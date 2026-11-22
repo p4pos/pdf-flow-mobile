@@ -32,7 +32,7 @@ export async function loadPdf(data: ArrayBuffer | Blob): Promise<pdfjsLib.PDFDoc
 }
 
 /**
- * Renders a specific page onto an HTMLCanvasElement
+ * Renders a specific page onto an HTMLCanvasElement with High-DPI crisp rendering
  */
 export async function renderPage(
   pdfDoc: pdfjsLib.PDFDocumentProxy,
@@ -43,18 +43,28 @@ export async function renderPage(
   const page = await pdfDoc.getPage(pageNumber);
   const viewport = page.getViewport({ scale });
   
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
+  // Calculate device pixel ratio for razor-sharp rendering on high-DPI and mobile retina displays
+  const dpr = typeof window !== 'undefined' ? Math.max(window.devicePixelRatio || 1, 2) : 2;
+
+  // Set internal canvas buffer to high-DPI resolution
+  canvas.width = Math.floor(viewport.width * dpr);
+  canvas.height = Math.floor(viewport.height * dpr);
+
+  // Set CSS display size to match viewport dimensions
+  canvas.style.width = `${Math.floor(viewport.width)}px`;
+  canvas.style.height = `${Math.floor(viewport.height)}px`;
   
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) throw new Error('Cannot get canvas 2d context');
 
-  // Clear canvas
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Fill crisp opaque white background
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const renderContext = {
     canvasContext: ctx,
     viewport: viewport,
+    transform: [dpr, 0, 0, dpr, 0, 0] as [number, number, number, number, number, number],
   };
 
   await page.render(renderContext).promise;
@@ -66,35 +76,40 @@ export async function renderPage(
 }
 
 /**
- * Generates a thumbnail image (Data URL) of the first page of a PDF
+ * Generates a high-resolution thumbnail image (Data URL) of the first page of a PDF
  */
 export async function generateCoverThumbnail(
   data: ArrayBuffer | Blob,
-  targetWidth: number = 240
+  targetWidth: number = 720
 ): Promise<{ thumbnailDataUrl: string; pageCount: number }> {
   try {
     const pdfDoc = await loadPdf(data);
     const pageCount = pdfDoc.numPages;
     const page = await pdfDoc.getPage(1);
     
-    // Calculate scale to achieve targetWidth
+    // Ensure width is at least 600px for crisp rendering on high-density cards
+    const effectiveWidth = Math.max(targetWidth, 600);
     const initialViewport = page.getViewport({ scale: 1.0 });
-    const scale = targetWidth / initialViewport.width;
+    const scale = effectiveWidth / initialViewport.width;
     const viewport = page.getViewport({ scale });
 
     const canvas = document.createElement('canvas');
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) throw new Error('Cannot get canvas 2d context');
+
+    // Fill crisp opaque white background behind page
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     await page.render({
       canvasContext: ctx,
       viewport: viewport,
     }).promise;
 
-    const thumbnailDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    const thumbnailDataUrl = canvas.toDataURL('image/jpeg', 0.90);
     return { thumbnailDataUrl, pageCount };
   } catch (error) {
     console.error('Failed to generate cover thumbnail:', error);

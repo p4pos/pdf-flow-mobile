@@ -17,7 +17,9 @@ import {
   RotateCcw,
   AlertCircle,
   Loader2,
-  RefreshCw
+  RefreshCw,
+  StretchHorizontal,
+  Minimize2
 } from 'lucide-react';
 import type * as pdfjsLib from 'pdfjs-dist';
 
@@ -43,7 +45,8 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   // Navigation & document state
   const [currentPage, setCurrentPage] = useState<number>(initialPage);
   const [totalPages, setTotalPages] = useState<number>(doc?.pageCount || 1);
-  const [scale, setScale] = useState<number>(1.2);
+  const [scale, setScale] = useState<number>(1.0);
+  const [fitMode, setFitMode] = useState<'width' | 'page' | 'custom'>('width');
   const [theme, setTheme] = useState<ReaderTheme>(initialTheme);
   const [isNotesOpen, setIsNotesOpen] = useState<boolean>(false);
   const [isFavorite, setIsFavorite] = useState<boolean>(doc?.isFavorite || false);

@@ -74,7 +74,7 @@ export const CoverEditorModal: React.FC<CoverEditorModalProps> = ({
       }
 
       if (blob) {
-        const { thumbnailDataUrl } = await generateCoverThumbnail(blob, 360);
+        const { thumbnailDataUrl } = await generateCoverThumbnail(blob, 720);
         if (thumbnailDataUrl) {
           setPageThumbnail(thumbnailDataUrl);
         }
