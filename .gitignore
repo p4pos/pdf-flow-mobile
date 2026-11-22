@@ -1,0 +1,22 @@
+# Dependencies
+node_modules
+.pnpm-store
+
+# Production build
+dist
+
+# Environment & local files
+.env
+.env.local
+*.log
+
+# Editor & OS files
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+
+# Capacitor / Android build outputs
+android/app/build
+android/.gradle
+android/build
