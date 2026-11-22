@@ -54,77 +54,86 @@ const ContinuousPageCanvas: React.FC<ContinuousPageCanvasProps> = React.memo(
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const [isRendered, setIsRendered] = useState<boolean>(false);
     const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
+    const isFirstRenderRef = useRef<boolean>(true);
 
     useEffect(() => {
       if (!pdfDoc || !canvasRef.current) return;
       let isCancelled = false;
 
-      const render = async () => {
-        // Cancel any previous in-flight render on this page
-        if (renderTaskRef.current) {
-          try {
-            renderTaskRef.current.cancel();
-          } catch {
-            // Ignore cancel errors
-          }
-          renderTaskRef.current = null;
-        }
+      // Initial render executes immediately; zoom scale changes are debounced by 200ms
+      // so pinch gestures remain silky smooth with zero canvas cancellation thrashing!
+      const delay = isFirstRenderRef.current ? 0 : 200;
+      isFirstRenderRef.current = false;
 
-        try {
-          const page = await pdfDoc.getPage(pageNumber);
-          if (isCancelled || !canvasRef.current) return;
-
-          const viewport = page.getViewport({ scale });
-          const dpr = typeof window !== 'undefined' ? Math.max(window.devicePixelRatio || 1, 2) : 2;
-
-          // Render into an offscreen canvas first to avoid any white flash or blank screen
-          const offscreenCanvas = document.createElement('canvas');
-          offscreenCanvas.width = Math.floor(viewport.width * dpr);
-          offscreenCanvas.height = Math.floor(viewport.height * dpr);
-
-          const ctx = offscreenCanvas.getContext('2d', { alpha: false });
-          if (!ctx) return;
-
-          // Crisp opaque white background
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
-
-          const renderContext = {
-            canvasContext: ctx,
-            viewport,
-            transform: [dpr, 0, 0, dpr, 0, 0] as [number, number, number, number, number, number],
-          };
-
-          const task = page.render(renderContext);
-          renderTaskRef.current = task;
-          await task.promise;
-
-          if (!isCancelled && canvasRef.current) {
-            const mainCanvas = canvasRef.current;
-            mainCanvas.width = offscreenCanvas.width;
-            mainCanvas.height = offscreenCanvas.height;
-            mainCanvas.style.width = '100%';
-            mainCanvas.style.height = '100%';
-
-            const mainCtx = mainCanvas.getContext('2d', { alpha: false });
-            if (mainCtx) {
-              mainCtx.drawImage(offscreenCanvas, 0, 0);
+      const timerId = setTimeout(() => {
+        const render = async () => {
+          // Cancel any previous in-flight render on this page
+          if (renderTaskRef.current) {
+            try {
+              renderTaskRef.current.cancel();
+            } catch {
+              // Ignore cancel errors
             }
-            setIsRendered(true);
+            renderTaskRef.current = null;
           }
-        } catch (err: any) {
-          if (err?.name !== 'RenderingCancelledException') {
-            console.warn(`Render error on page ${pageNumber}:`, err);
-          }
-        } finally {
-          renderTaskRef.current = null;
-        }
-      };
 
-      render();
+          try {
+            const page = await pdfDoc.getPage(pageNumber);
+            if (isCancelled || !canvasRef.current) return;
+
+            const viewport = page.getViewport({ scale });
+            const dpr = typeof window !== 'undefined' ? Math.max(window.devicePixelRatio || 1, 2) : 2;
+
+            // Render into an offscreen canvas first to avoid any white flash or blank screen
+            const offscreenCanvas = document.createElement('canvas');
+            offscreenCanvas.width = Math.floor(viewport.width * dpr);
+            offscreenCanvas.height = Math.floor(viewport.height * dpr);
+
+            const ctx = offscreenCanvas.getContext('2d', { alpha: false });
+            if (!ctx) return;
+
+            // Crisp opaque white background
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+
+            const renderContext = {
+              canvasContext: ctx,
+              viewport,
+              transform: [dpr, 0, 0, dpr, 0, 0] as [number, number, number, number, number, number],
+            };
+
+            const task = page.render(renderContext);
+            renderTaskRef.current = task;
+            await task.promise;
+
+            if (!isCancelled && canvasRef.current) {
+              const mainCanvas = canvasRef.current;
+              mainCanvas.width = offscreenCanvas.width;
+              mainCanvas.height = offscreenCanvas.height;
+              mainCanvas.style.width = '100%';
+              mainCanvas.style.height = '100%';
+
+              const mainCtx = mainCanvas.getContext('2d', { alpha: false });
+              if (mainCtx) {
+                mainCtx.drawImage(offscreenCanvas, 0, 0);
+              }
+              setIsRendered(true);
+            }
+          } catch (err: any) {
+            if (err?.name !== 'RenderingCancelledException') {
+              console.warn(`Render error on page ${pageNumber}:`, err);
+            }
+          } finally {
+            renderTaskRef.current = null;
+          }
+        };
+
+        render();
+      }, delay);
 
       return () => {
         isCancelled = true;
+        clearTimeout(timerId);
         if (renderTaskRef.current) {
           try {
             renderTaskRef.current.cancel();
@@ -344,6 +353,14 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
         container.scrollLeft = targetScrollLeft;
         container.scrollTop = targetScrollTop;
+
+        // Synchronously clear the temporary GPU pinch transform in the EXACT SAME frame
+        // that the new layout dimensions and scroll offsets take effect! Zero flash or snap!
+        if (contentWrapperRef.current) {
+          contentWrapperRef.current.style.transform = '';
+          contentWrapperRef.current.style.transformOrigin = '';
+          contentWrapperRef.current.style.transition = '';
+        }
 
         // Double check on next animation frame in case child styles finished reflow
         requestAnimationFrame(() => {
@@ -573,27 +590,30 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     if (rafIdRef.current) return;
     rafIdRef.current = requestAnimationFrame(() => {
       rafIdRef.current = 0;
-      const containerRect = container.getBoundingClientRect();
-      const centerY = containerRect.top + containerRect.height / 2;
+      const scrollCenter = container.scrollTop + container.clientHeight / 2;
 
       let closestPage = currentPage;
       let minDistance = Infinity;
 
-      pageElementsRef.current.forEach((el, pageNum) => {
-        const rect = el.getBoundingClientRect();
-        const pageCenter = rect.top + rect.height / 2;
-        const dist = Math.abs(pageCenter - centerY);
+      for (let p = 1; p <= totalPages; p++) {
+        const el = pageElementsRef.current.get(p);
+        if (!el) continue;
+        const pageCenter = el.offsetTop + el.offsetHeight / 2;
+        const dist = Math.abs(pageCenter - scrollCenter);
         if (dist < minDistance) {
           minDistance = dist;
-          closestPage = pageNum;
+          closestPage = p;
+        } else if (dist > minDistance) {
+          // Since pages are ordered top-to-bottom, once distance increases, we passed the closest page!
+          break;
         }
-      });
+      }
 
       if (closestPage !== currentPage) {
         setCurrentPage(closestPage);
       }
     });
-  }, [mode, currentPage, isPinching]);
+  }, [mode, currentPage, totalPages, isPinching]);
 
   // Page navigation helpers
   const goToNextPage = () => {
@@ -773,12 +793,6 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       pinchStateRef.current = null;
       setIsPinching(false);
 
-      if (contentWrapperRef.current) {
-        contentWrapperRef.current.style.transform = '';
-        contentWrapperRef.current.style.transformOrigin = '';
-        contentWrapperRef.current.style.transition = '';
-      }
-
       const fitWidthScale = getFitWidthScale();
       const minScale = fitWidthScale;
       const maxScale = Math.max(fitWidthScale * 3.5, 3.5);
@@ -791,16 +805,26 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       const finalViewX = pinch.startViewX + pinch.lastDx;
       const finalViewY = pinch.startViewY + pinch.lastDy;
 
-      pendingScrollAnchorRef.current = {
-        targetPage: pinch.targetPage,
-        unscaledPageX: pinch.unscaledPageX,
-        unscaledPageY: pinch.unscaledPageY,
-        viewX: finalViewX,
-        viewY: finalViewY
-      };
+      if (clampedScale === scale) {
+        // If scale didn't change, useLayoutEffect won't fire, so clear transform immediately
+        if (contentWrapperRef.current) {
+          contentWrapperRef.current.style.transform = '';
+          contentWrapperRef.current.style.transformOrigin = '';
+          contentWrapperRef.current.style.transition = '';
+        }
+      } else {
+        // Keep GPU transform active until useLayoutEffect commits the new DOM dimensions and scroll offsets!
+        pendingScrollAnchorRef.current = {
+          targetPage: pinch.targetPage,
+          unscaledPageX: pinch.unscaledPageX,
+          unscaledPageY: pinch.unscaledPageY,
+          viewX: finalViewX,
+          viewY: finalViewY
+        };
 
-      setFitMode(clampedScale === fitWidthScale ? 'width' : 'custom');
-      setScale(clampedScale);
+        setFitMode(clampedScale === fitWidthScale ? 'width' : 'custom');
+        setScale(clampedScale);
+      }
     }
 
     // 1-finger horizontal swipe in Single Page mode
@@ -1178,7 +1202,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           style={{
             WebkitOverflowScrolling: 'touch',
             overscrollBehavior: 'contain',
-            touchAction: isZoomed ? 'pan-x pan-y pinch-zoom' : 'pan-y pinch-zoom'
+            touchAction: isZoomed ? 'pan-x pan-y' : 'pan-y'
           }}
           className={`absolute inset-0 overflow-auto overscroll-contain transition-colors duration-300 ${viewportBgClass} ${
             isZoomed ? 'cursor-grab active:cursor-grabbing' : ''
@@ -1296,7 +1320,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
                       {/* Canvas or Exact Aspect Ratio Placeholder */}
                       <div
-                        className={`relative rounded-lg overflow-hidden transition-all duration-150 ${canvasContainerClass}`}
+                        className={`relative rounded-lg overflow-hidden transition-shadow duration-150 ${canvasContainerClass}`}
                         style={{
                           width: `${displayWidth}px`,
                           height: `${displayHeight}px`,
@@ -1342,7 +1366,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                       }}
                     >
                       <div
-                        className={`relative rounded-lg overflow-hidden transition-all duration-150 ${canvasContainerClass}`}
+                        className={`relative rounded-lg overflow-hidden transition-shadow duration-150 ${canvasContainerClass}`}
                         style={{
                           width: `${displayWidth}px`,
                           height: `${displayHeight}px`,
