@@ -41,19 +41,20 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Initialize Capacitor Android Platform
         run: |
           npx cap add android
           npx cap sync android
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
 
       - name: Build Android Debug APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleDebug --no-daemon
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
 
       - name: Rename and Prepare APK Artifact
         run: |
