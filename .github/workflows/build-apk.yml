@@ -72,8 +72,8 @@ jobs:
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0
-          name: "PDF Flow Mobile v1.0.0 - Android Installer"
+          tag_name: "v1.0.${{ github.run_number }}"
+          name: "PDF Flow Mobile v1.0.${{ github.run_number }} - Android Installer"
           body: |
             ## 📱 PDF Flow Android Release v1.0.0
 
