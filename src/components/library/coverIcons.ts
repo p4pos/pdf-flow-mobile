@@ -16,6 +16,8 @@ import {
   Coffee,
   Award,
   Folder,
+  User,
+  FolderKanban,
   LucideIcon
 } from 'lucide-react';
 import { GRADIENT_PRESETS, GradientPreset } from '../../utils/formatters';
@@ -33,6 +35,8 @@ export const COVER_ICONS: CoverIconItem[] = [
   { id: 'GraduationCap', label: 'Study', icon: GraduationCap },
   { id: 'Briefcase', label: 'Work', icon: Briefcase },
   { id: 'Receipt', label: 'Finance', icon: Receipt },
+  { id: 'User', label: 'Personal', icon: User },
+  { id: 'FolderKanban', label: 'Projects', icon: FolderKanban },
   { id: 'Code', label: 'Code', icon: Code },
   { id: 'Bookmark', label: 'Reference', icon: Bookmark },
   { id: 'Lightbulb', label: 'Ideas', icon: Lightbulb },
@@ -40,15 +44,22 @@ export const COVER_ICONS: CoverIconItem[] = [
   { id: 'Compass', label: 'Travel', icon: Compass },
   { id: 'PenTool', label: 'Design', icon: PenTool },
   { id: 'Award', label: 'Certificate', icon: Award },
-  { id: 'Coffee', label: 'Personal', icon: Coffee },
+  { id: 'Coffee', label: 'Coffee', icon: Coffee },
   { id: 'Music', label: 'Arts', icon: Music },
   { id: 'Folder', label: 'Archive', icon: Folder },
 ];
 
 export function getCoverIcon(iconId?: string): LucideIcon {
-  if (!iconId) return BookOpen;
+  if (!iconId) return Folder;
   const match = COVER_ICONS.find((item) => item.id.toLowerCase() === iconId.toLowerCase());
-  return match ? match.icon : BookOpen;
+  if (match) return match.icon;
+  const idLower = iconId.toLowerCase().trim();
+  if (idLower === 'work' || idLower === 'briefcase') return Briefcase;
+  if (idLower === 'study' || idLower === 'books' || idLower === 'graduationcap') return GraduationCap;
+  if (idLower === 'finance' || idLower === 'bills' || idLower === 'receipt') return Receipt;
+  if (idLower === 'personal' || idLower === 'user') return User;
+  if (idLower === 'kanban' || idLower === 'projects' || idLower === 'folderkanban') return FolderKanban;
+  return Folder;
 }
 
 /**

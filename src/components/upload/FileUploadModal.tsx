@@ -357,52 +357,90 @@ export const FileUploadModal: React.FC<FileUploadModalProps> = ({
           </div>
 
           {/* Group and Privacy Settings */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+          <div className="space-y-3 pt-1">
             {/* Group Selector */}
             <div>
-              <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1.5">
-                Assign to Group
-              </label>
-              <div className="relative">
-                <Folder className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-                <select
-                  value={selectedGroupId}
-                  onChange={(e) => setSelectedGroupId(e.target.value)}
-                  className="w-full pl-9 pr-8 py-2 rounded-xl bg-gray-100 dark:bg-zinc-800 text-xs text-gray-900 dark:text-white font-medium border border-transparent focus:border-blue-500 outline-none appearance-none"
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs font-bold text-gray-800 dark:text-zinc-200 flex items-center gap-1.5">
+                  <Folder className="w-3.5 h-3.5 text-blue-500" />
+                  <span>Assign to Group</span>
+                </label>
+                <span className="text-[11px] text-gray-400">
+                  {selectedGroupId ? groups.find((g) => g.id === selectedGroupId)?.name || 'Selected' : 'Unorganized'}
+                </span>
+              </div>
+
+              {/* Horizontal Scrollable Group Pills */}
+              <div className="flex items-center gap-2 overflow-x-auto pb-1.5 pt-0.5 no-scrollbar -mx-1 px-1">
+                {/* None Option */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedGroupId('')}
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-1.5 shrink-0 border ${
+                    !selectedGroupId
+                      ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                      : 'bg-gray-100 dark:bg-zinc-800/80 text-gray-700 dark:text-zinc-300 border-gray-200/60 dark:border-zinc-700/60 hover:bg-gray-200'
+                  }`}
                 >
-                  <option value="">None (Unorganized)</option>
-                  {groups.map((group) => (
-                    <option key={group.id} value={group.id}>
-                      {group.name}
-                    </option>
-                  ))}
-                </select>
+                  <Folder className="w-3.5 h-3.5" />
+                  <span>Unorganized</span>
+                  {!selectedGroupId && <CheckCircle2 className="w-3.5 h-3.5 ml-0.5" />}
+                </button>
+
+                {/* Dynamic Groups */}
+                {groups.map((group) => {
+                  const isSelected = selectedGroupId === group.id;
+                  return (
+                    <button
+                      key={group.id}
+                      type="button"
+                      onClick={() => setSelectedGroupId(group.id)}
+                      className={`px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all flex items-center gap-2 shrink-0 border ${
+                        isSelected
+                          ? 'border-transparent shadow-xs text-white'
+                          : 'bg-gray-100 dark:bg-zinc-800/80 text-gray-700 dark:text-zinc-300 border-gray-200/60 dark:border-zinc-700/60 hover:bg-gray-200'
+                      }`}
+                      style={isSelected ? { backgroundColor: group.color } : {}}
+                    >
+                      <span
+                        className="w-2.5 h-2.5 rounded-full shrink-0"
+                        style={{ backgroundColor: isSelected ? '#ffffff' : group.color }}
+                      />
+                      <span>{group.name}</span>
+                      {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-white ml-0.5" />}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
             {/* Privacy Vault Toggle */}
-            <div>
-              <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1.5">
-                Privacy Vault
-              </label>
+            <div className="pt-1">
               <button
                 type="button"
                 onClick={() => setIsPrivateVault(!isPrivateVault)}
-                className={`w-full py-2 px-3 rounded-xl border flex items-center justify-between text-xs font-medium transition-all ${
+                className={`w-full py-2.5 px-3.5 rounded-2xl border flex items-center justify-between text-xs font-medium transition-all ${
                   isPrivateVault
-                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-amber-300 font-bold'
-                    : 'bg-gray-100 dark:bg-zinc-800 border-transparent text-gray-700 dark:text-gray-300'
+                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-700 dark:text-amber-300 font-bold shadow-xs'
+                    : 'bg-gray-50 dark:bg-zinc-800/60 border-gray-200/70 dark:border-zinc-700/70 text-gray-700 dark:text-gray-300'
                 }`}
               >
-                <span className="flex items-center gap-1.5">
-                  <Lock className="w-3.5 h-3.5" />
-                  <span>Hidden in Vault</span>
-                </span>
-                <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                  isPrivateVault ? 'bg-amber-500 text-white' : 'bg-gray-300 dark:bg-zinc-600 text-transparent'
+                <div className="flex items-center gap-2">
+                  <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${
+                    isPrivateVault ? 'bg-amber-500 text-white' : 'bg-gray-200 dark:bg-zinc-700 text-gray-500'
+                  }`}>
+                    <Lock className="w-3.5 h-3.5" />
+                  </div>
+                  <div className="text-left">
+                    <span className="block font-bold leading-tight">Private Vault (Hidden)</span>
+                    <span className="text-[10px] text-gray-400">Keep this document hidden from normal view</span>
+                  </div>
+                </div>
+                <div className={`w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold transition-transform ${
+                  isPrivateVault ? 'bg-amber-500 text-white scale-110' : 'bg-gray-300 dark:bg-zinc-600 text-transparent'
                 }`}>
                   ✓
-                </span>
+                </div>
               </button>
             </div>
           </div>
