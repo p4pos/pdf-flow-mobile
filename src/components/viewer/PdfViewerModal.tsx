@@ -183,12 +183,13 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   const [isScrolling, setIsScrolling] = useState<boolean>(false);
   const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
 
-  // Smooth focal-point pinch-to-zoom state & anchor tracking
+  // Smooth focal-point pinch-to-zoom state & active page anchor tracking
   interface PinchState {
     startDist: number;
     startScale: number;
-    unscaledDocX: number;
-    unscaledDocY: number;
+    targetPage: number;
+    unscaledPageX: number;
+    unscaledPageY: number;
     startViewX: number;
     startViewY: number;
     lastRatio: number;
@@ -197,8 +198,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   }
   const pinchStateRef = useRef<PinchState | null>(null);
   const pendingScrollAnchorRef = useRef<{
-    unscaledDocX: number;
-    unscaledDocY: number;
+    targetPage: number;
+    unscaledPageX: number;
+    unscaledPageY: number;
     viewX: number;
     viewY: number;
   } | null>(null);
@@ -264,44 +266,82 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     return cachedFitWidthScaleRef.current || 1.0;
   }, [currentPage, calculateScaleForMode]);
 
-  // Focal-point zoom anchor helper: Keeps the exact document point under (clientX, clientY) pinned when scale changes
+  // Focal-point zoom anchor helper: strictly locks zoom to the currently active reading page (currentPage)
+  // and enforces Fit-to-Width as the minimum zoom floor so the document never shrinks to tiny multi-page stamps!
   const zoomAroundPoint = useCallback(
     (nextScale: number, clientX?: number, clientY?: number) => {
       const container = viewportContainerRef.current;
-      const clampedScale = Math.min(Math.max(Math.round(nextScale * 100) / 100, 0.4), 3.5);
-      if (!container) {
-        setScale(clampedScale);
-        return;
-      }
+      if (!container) return;
+
+      const fitWidthScale = getFitWidthScale();
+      const minScale = fitWidthScale;
+      const maxScale = Math.max(fitWidthScale * 3.5, 3.5);
+      const clampedScale = Math.min(Math.max(Math.round(nextScale * 100) / 100, minScale), maxScale);
+
       const rect = container.getBoundingClientRect();
       const viewX = clientX !== undefined ? clientX - rect.left : container.clientWidth / 2;
       const viewY = clientY !== undefined ? clientY - rect.top : container.clientHeight / 2;
 
-      const docX = container.scrollLeft + viewX;
-      const docY = container.scrollTop + viewY;
       const currentScale = scale || 1.0;
+      const activePageEl = pageElementsRef.current.get(currentPage);
+
+      let unscaledPageX: number;
+      let unscaledPageY: number;
+
+      if (activePageEl && mode === 'continuous') {
+        const pageTop = activePageEl.offsetTop;
+        const pageLeft = activePageEl.offsetLeft;
+        const pageHeight = activePageEl.offsetHeight;
+        const pageWidth = activePageEl.offsetWidth;
+
+        // Where is the touch/view center relative to currentPage? Clamp strictly inside currentPage bounds!
+        const pageRelY = Math.min(Math.max(container.scrollTop + viewY - pageTop, 0), pageHeight);
+        const pageRelX = Math.min(Math.max(container.scrollLeft + viewX - pageLeft, 0), pageWidth);
+
+        unscaledPageX = pageRelX / currentScale;
+        unscaledPageY = pageRelY / currentScale;
+      } else {
+        const docX = container.scrollLeft + viewX;
+        const docY = container.scrollTop + viewY;
+        unscaledPageX = docX / currentScale;
+        unscaledPageY = docY / currentScale;
+      }
 
       pendingScrollAnchorRef.current = {
-        unscaledDocX: docX / currentScale,
-        unscaledDocY: docY / currentScale,
+        targetPage: currentPage,
+        unscaledPageX,
+        unscaledPageY,
         viewX,
         viewY
       };
 
+      setFitMode(clampedScale === fitWidthScale ? 'width' : 'custom');
       setScale(clampedScale);
     },
-    [scale]
+    [scale, currentPage, mode, getFitWidthScale]
   );
 
-  // Synchronously restores the scroll position around the focal anchor point as soon as scale updates DOM
+  // Synchronously restores the scroll position around the active page anchor as soon as scale updates DOM
   useLayoutEffect(() => {
     if (pendingScrollAnchorRef.current) {
-      const { unscaledDocX, unscaledDocY, viewX, viewY } = pendingScrollAnchorRef.current;
+      const { targetPage, unscaledPageX, unscaledPageY, viewX, viewY } = pendingScrollAnchorRef.current;
       pendingScrollAnchorRef.current = null;
       const container = viewportContainerRef.current;
       if (container) {
-        const targetScrollLeft = Math.max(0, Math.round(unscaledDocX * scale - viewX));
-        const targetScrollTop = Math.max(0, Math.round(unscaledDocY * scale - viewY));
+        const activePageEl = pageElementsRef.current.get(targetPage);
+        let targetScrollLeft = 0;
+        let targetScrollTop = 0;
+
+        if (activePageEl && mode === 'continuous') {
+          const newPageTop = activePageEl.offsetTop;
+          const newPageLeft = activePageEl.offsetLeft;
+          targetScrollLeft = Math.max(0, Math.round(newPageLeft + (unscaledPageX * scale) - viewX));
+          targetScrollTop = Math.max(0, Math.round(newPageTop + (unscaledPageY * scale) - viewY));
+        } else {
+          targetScrollLeft = Math.max(0, Math.round(unscaledPageX * scale - viewX));
+          targetScrollTop = Math.max(0, Math.round(unscaledPageY * scale - viewY));
+        }
+
         container.scrollLeft = targetScrollLeft;
         container.scrollTop = targetScrollTop;
 
@@ -314,7 +354,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
         });
       }
     }
-  }, [scale]);
+  }, [scale, mode]);
 
   // Load document notes from IndexedDB
   const loadDocumentNotes = useCallback(async () => {
@@ -604,8 +644,10 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   };
 
   const zoomOut = () => {
-    setFitMode('custom');
-    zoomAroundPoint(Math.max(Math.round((scale - 0.25) * 100) / 100, 0.4));
+    const fitWidthScale = getFitWidthScale();
+    const nextScale = Math.max(Math.round((scale - 0.25) * 100) / 100, fitWidthScale);
+    setFitMode(nextScale === fitWidthScale ? 'width' : 'custom');
+    zoomAroundPoint(nextScale);
   };
 
   const resetZoom = () => {
@@ -639,14 +681,35 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       const containerRect = container.getBoundingClientRect();
       const midX = (t1.clientX + t2.clientX) / 2 - containerRect.left;
       const midY = (t1.clientY + t2.clientY) / 2 - containerRect.top;
-      const docPointX = container.scrollLeft + midX;
-      const docPointY = container.scrollTop + midY;
+
+      const activePageEl = pageElementsRef.current.get(currentPage);
+      let originDocX = container.scrollLeft + midX;
+      let originDocY = container.scrollTop + midY;
+      let unscaledPageX = originDocX / scale;
+      let unscaledPageY = originDocY / scale;
+
+      if (activePageEl && mode === 'continuous') {
+        const pageTop = activePageEl.offsetTop;
+        const pageLeft = activePageEl.offsetLeft;
+        const pageHeight = activePageEl.offsetHeight;
+        const pageWidth = activePageEl.offsetWidth;
+
+        // Strictly lock focal anchor to the currentPage currently being read!
+        const pageRelY = Math.min(Math.max(container.scrollTop + midY - pageTop, 0), pageHeight);
+        const pageRelX = Math.min(Math.max(container.scrollLeft + midX - pageLeft, 0), pageWidth);
+
+        originDocX = pageLeft + pageRelX;
+        originDocY = pageTop + pageRelY;
+        unscaledPageX = pageRelX / scale;
+        unscaledPageY = pageRelY / scale;
+      }
 
       pinchStateRef.current = {
         startDist: dist,
         startScale: scale,
-        unscaledDocX: docPointX / scale,
-        unscaledDocY: docPointY / scale,
+        targetPage: currentPage,
+        unscaledPageX,
+        unscaledPageY,
         startViewX: midX,
         startViewY: midY,
         lastRatio: 1.0,
@@ -655,7 +718,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       };
 
       if (contentWrapperRef.current) {
-        contentWrapperRef.current.style.transformOrigin = `${docPointX}px ${docPointY}px`;
+        contentWrapperRef.current.style.transformOrigin = `${originDocX}px ${originDocY}px`;
         contentWrapperRef.current.style.transition = 'none';
       }
 
@@ -716,21 +779,27 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
         contentWrapperRef.current.style.transition = '';
       }
 
+      const fitWidthScale = getFitWidthScale();
+      const minScale = fitWidthScale;
+      const maxScale = Math.max(fitWidthScale * 3.5, 3.5);
+
       const finalRatio = pinch.lastRatio;
       const rawScale = pinch.startScale * finalRatio;
-      const clampedScale = Math.min(Math.max(Math.round(rawScale * 100) / 100, 0.4), 3.5);
+      // Clamped strictly to Fit-Width so the user never pinches into tiny 40% cards!
+      const clampedScale = Math.min(Math.max(Math.round(rawScale * 100) / 100, minScale), maxScale);
 
       const finalViewX = pinch.startViewX + pinch.lastDx;
       const finalViewY = pinch.startViewY + pinch.lastDy;
 
       pendingScrollAnchorRef.current = {
-        unscaledDocX: pinch.unscaledDocX,
-        unscaledDocY: pinch.unscaledDocY,
+        targetPage: pinch.targetPage,
+        unscaledPageX: pinch.unscaledPageX,
+        unscaledPageY: pinch.unscaledPageY,
         viewX: finalViewX,
         viewY: finalViewY
       };
 
-      setFitMode('custom');
+      setFitMode(clampedScale === fitWidthScale ? 'width' : 'custom');
       setScale(clampedScale);
     }
 
@@ -1149,7 +1218,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                2) 360-degree free pan without flexbox clipping when zoomed in! */
             <div
               ref={contentWrapperRef}
-              className="min-w-full min-h-full w-max flex flex-col items-center py-5 px-3 m-auto"
+              className="min-w-full min-h-full w-max flex flex-col py-5 px-3"
               style={{
                 willChange: isPinching ? 'transform' : 'auto'
               }}
@@ -1178,14 +1247,15 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                         }
                       }}
                       data-page-number={pageNum}
-                      className="relative flex flex-col items-center mb-6 last:mb-2 transition-shadow"
+                      className="relative flex flex-col mx-auto mb-6 last:mb-2 transition-shadow"
                       style={{
                         width: `${displayWidth}px`,
                         minHeight: `${displayHeight}px`
                       }}
                     >
-                      {/* In-Page Header Strip: Page number & In-Page Note Badge */}
-                      <div className="w-full flex items-center justify-between px-2 py-1 mb-1 text-xs">
+                      {/* In-Page Header Strip: Page number & In-Page Note Badge (hidden when zoomed in for clean view) */}
+                      {!isZoomed && (
+                        <div className="w-full flex items-center justify-between px-2 py-1 mb-1 text-xs">
                         <span className="font-semibold text-zinc-400 text-[11px] tracking-wide">
                           PAGE {pageNum}
                         </span>
@@ -1222,6 +1292,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
                           )}
                         </div>
                       </div>
+                    )}
 
                       {/* Canvas or Exact Aspect Ratio Placeholder */}
                       <div
@@ -1264,7 +1335,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
                   return (
                     <div
-                      className="relative flex flex-col items-center my-auto transition-shadow"
+                      className="relative flex flex-col mx-auto my-auto transition-shadow"
                       style={{
                         width: `${displayWidth}px`,
                         minHeight: `${displayHeight}px`
@@ -1300,7 +1371,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           <div
             ref={scrubberTrackRef}
             className={`absolute right-1 top-16 bottom-20 z-30 w-10 flex items-center justify-center select-none touch-none transition-opacity duration-300 ${
-              isPinching ? 'opacity-0 pointer-events-none' : isScrubbing || isScrolling ? 'opacity-100' : 'opacity-35 hover:opacity-100'
+              isPinching || isZoomed ? 'opacity-0 pointer-events-none' : isScrubbing || isScrolling ? 'opacity-100' : 'opacity-35 hover:opacity-100'
             }`}
             onTouchStart={handleScrubberTouchStart}
             onTouchMove={handleScrubberTouchMove}
