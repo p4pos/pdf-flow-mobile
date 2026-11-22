@@ -75,15 +75,17 @@ jobs:
           tag_name: "v1.1.${{ github.run_number }}"
           name: "PDF Flow Mobile v1.1.${{ github.run_number }} - Android Installer"
           body: |
-            ## 📱 PDF Flow Android Release v1.1.0
+            ## 📱 PDF Flow Android Release v1.1.${{ github.run_number }}
 
-            ### New in this release:
-            - **High-DPI Razor Sharp PDF Viewer**: Crisp rendering for mobile retina screens with dynamic Fit-to-Width and Fit-to-Page scaling.
-            - **All Notes Tab Redesign**: Apple Notes & Google Keep inspired aesthetic, eliminating stacked duplicate search bars, with warm cards, color filters, and direct page jumping.
-            - **Secret Vault & Hide Fix**: Resolved 3-dot menu double-inversion bug; hidden PDFs now reliably stay locked in the vault.
-            - **Group Persistence Fix**: Deleted groups stay deleted permanently without unintended auto-restoration.
-            - **Accurate Document Counts**: "All Documents" and group counts match strictly with the active view.
-            - **High-Res Cover Generation & Custom Group Picker**: Crisp 720px thumbnails and tactile iOS/M3 group chips.
+            ### What's New in This Release:
+            - **Continuous Vertical Scroll Reader**: All pages scroll continuously in a vertical column with native 120Hz touch fling momentum, just like Google Drive and Adobe Acrobat.
+            - **Fast-Scroll Scrubber**: Sleek floating page scrubber on the right edge with interactive touch drag and real-time page bubble indicator.
+            - **Fluid Pinch-to-Zoom & 360° Free Pan**: GPU hardware-accelerated CSS pinch zooming with debounced High-DPI re-rendering. Zoom in up to 3.5x and freely pan 360° without edge clipping.
+            - **Continuous vs. Single Page Toggle**: Switch between continuous scroll and single page mode with one tap.
+            - **In-Page Note Badges**: In-page note pills allow you to view and edit notes directly for any page while scrolling.
+            - **Persistent Keystore Signing**: Build is signed with the persistent release keystore for smooth in-place updates.
+            - **Background State & Memory Retention**: Prevents app restart when switching to other apps (e.g. WhatsApp, YouTube).
+            - **Native Back Button Handling**: Hardware back button navigates backwards gracefully through the app.
 
             ### Installation:
             Download the `PDFFlow-Android-Installer.apk` below and install it directly on your Android device!
