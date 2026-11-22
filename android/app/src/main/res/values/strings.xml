@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PDF Flow</string>
+    <string name="title_activity_main">PDF Flow</string>
+    <string name="package_name">com.pdfflow.app</string>
+    <string name="custom_url_scheme">com.pdfflow.app</string>
+</resources>

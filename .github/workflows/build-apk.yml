@@ -41,9 +41,8 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Initialize Capacitor Android Platform
+      - name: Sync Capacitor Android Platform
         run: |
-          npx cap add android
           npx cap sync android
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk

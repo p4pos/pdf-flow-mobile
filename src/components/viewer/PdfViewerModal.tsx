@@ -31,6 +31,7 @@ export interface PdfViewerModalProps {
   initialTheme?: ReaderTheme;
   onToggleFavorite?: (documentId: string, isFavorite: boolean) => void;
   onDocumentUpdate?: (updatedDoc: PdfDocument) => void;
+  onPageChange?: (page: number) => void;
 }
 
 export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
@@ -40,7 +41,8 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   initialPage = 1,
   initialTheme = 'light',
   onToggleFavorite,
-  onDocumentUpdate
+  onDocumentUpdate,
+  onPageChange
 }) => {
   // Navigation & document state
   const [currentPage, setCurrentPage] = useState<number>(initialPage);
@@ -71,6 +73,13 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   const lastTapTimeRef = useRef<number>(0);
   const swipeStartXRef = useRef<number | null>(null);
   const swipeStartYRef = useRef<number | null>(null);
+  const lastTouchXRef = useRef<number | null>(null);
+  const lastTouchYRef = useRef<number | null>(null);
+  const isDraggingRef = useRef<boolean>(false);
+  const cachedFitWidthScaleRef = useRef<number>(1.0);
+  const isMouseDownRef = useRef<boolean>(false);
+  const lastMouseXRef = useRef<number | null>(null);
+  const lastMouseYRef = useRef<number | null>(null);
 
   // Helper to calculate target scale based on unscaled page dimensions and mode
   const calculateScaleForMode = useCallback(
@@ -110,6 +119,17 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     []
   );
 
+  // Helper to obtain current page's fit-width scale synchronously from cache or fallback
+  const getFitWidthScale = useCallback((): number => {
+    const cachedDims = pageDimensionsRef.current.get(currentPage);
+    if (cachedDims) {
+      const computed = calculateScaleForMode(cachedDims.width, cachedDims.height, 'width');
+      cachedFitWidthScaleRef.current = computed;
+      return computed;
+    }
+    return cachedFitWidthScaleRef.current || 1.0;
+  }, [currentPage, calculateScaleForMode]);
+
   // Sync state when document or modal open changes
   useEffect(() => {
     if (isOpen && doc) {
@@ -137,6 +157,13 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       pageDimensionsRef.current.clear();
     }
   }, [isOpen, doc?.id]);
+
+  // Report current page change for reader session persistence
+  useEffect(() => {
+    if (isOpen && currentPage > 0) {
+      onPageChange?.(currentPage);
+    }
+  }, [isOpen, currentPage, onPageChange]);
 
   // Load document notes from IndexedDB
   const loadDocumentNotes = async () => {
@@ -180,6 +207,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       const startPage = initialPage > 0 ? Math.min(initialPage, proxy.numPages) : 1;
       const dims = await getPageDimensionsCached(proxy, startPage);
       const initialScale = calculateScaleForMode(dims.width, dims.height, 'width');
+      cachedFitWidthScaleRef.current = initialScale;
 
       setFitMode('width');
       setScale(initialScale);
@@ -260,6 +288,14 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     }
   }, [scale, currentPage, isLoadingPdf, renderCurrentPage]);
 
+  // Reset scroll position to top-left when page changes
+  useEffect(() => {
+    if (viewportContainerRef.current) {
+      viewportContainerRef.current.scrollTop = 0;
+      viewportContainerRef.current.scrollLeft = 0;
+    }
+  }, [currentPage]);
+
   // Re-calculate fit scale when window or device orientation changes
   useEffect(() => {
     if (!isOpen) return;
@@ -327,13 +363,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
   const resetZoom = async () => {
     setFitMode('width');
-    if (pdfDocRef.current) {
-      const dims = await getPageDimensionsCached(pdfDocRef.current, currentPage);
-      const fitScale = calculateScaleForMode(dims.width, dims.height, 'width');
-      setScale(fitScale);
-    } else {
-      setScale(1.0);
-    }
+    const fitScale = getFitWidthScale();
+    setScale(fitScale);
+    viewportContainerRef.current?.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
   };
 
   // Theme toggle cycle: light -> sepia -> dark -> light
@@ -387,21 +419,20 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, isNotesOpen, currentPage, totalPages]);
 
-  // Double-tap helper to toggle between fit-width and detail zoom
+  // Double-tap helper to toggle between fit-width and 2x zoom
   const handleDoubleTap = async () => {
-    if (!pdfDocRef.current) return;
-    const dims = await getPageDimensionsCached(pdfDocRef.current, currentPage);
-    const fitWidthScale = calculateScaleForMode(dims.width, dims.height, 'width');
-    if (scale > fitWidthScale * 1.15) {
+    const fitWidthScale = getFitWidthScale();
+    if (scale > fitWidthScale * 1.05) {
       setFitMode('width');
       setScale(fitWidthScale);
+      viewportContainerRef.current?.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
     } else {
       setFitMode('custom');
-      setScale(Math.min(Math.round(fitWidthScale * 1.8 * 100) / 100, 3.0));
+      setScale(Math.min(Math.round(fitWidthScale * 2.0 * 100) / 100, 3.5));
     }
   };
 
-  // Touch handlers: Pinch-to-zoom, Double-tap, and 1-finger horizontal swipe
+  // Touch handlers: Pinch-to-zoom, Double-tap, 1-finger horizontal swipe page flip, and smooth drag-to-pan
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
     if (e.touches.length === 2) {
       // 2 fingers: pinch-to-zoom start
@@ -411,10 +442,17 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       );
       pinchStartDistRef.current = dist;
       pinchStartScaleRef.current = scale;
+      isDraggingRef.current = false;
+      lastTouchXRef.current = null;
+      lastTouchYRef.current = null;
     } else if (e.touches.length === 1) {
-      // 1 finger: record position for swipe & track double tap
-      swipeStartXRef.current = e.touches[0].clientX;
-      swipeStartYRef.current = e.touches[0].clientY;
+      // 1 finger: record position for swipe, tap & drag-to-pan
+      const touch = e.touches[0];
+      swipeStartXRef.current = touch.clientX;
+      swipeStartYRef.current = touch.clientY;
+      lastTouchXRef.current = touch.clientX;
+      lastTouchYRef.current = touch.clientY;
+      isDraggingRef.current = true;
 
       const now = Date.now();
       if (now - lastTapTimeRef.current < 300) {
@@ -428,6 +466,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
   const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
     if (e.touches.length === 2 && pinchStartDistRef.current) {
+      // Pinch-to-zoom
       const dist = Math.hypot(
         e.touches[0].clientX - e.touches[1].clientX,
         e.touches[0].clientY - e.touches[1].clientY
@@ -436,6 +475,26 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       const targetScale = Math.min(Math.max(pinchStartScaleRef.current * ratio, 0.4), 3.5);
       setFitMode('custom');
       setScale(Math.round(targetScale * 100) / 100);
+    } else if (
+      e.touches.length === 1 &&
+      isDraggingRef.current &&
+      lastTouchXRef.current !== null &&
+      lastTouchYRef.current !== null
+    ) {
+      const currentX = e.touches[0].clientX;
+      const currentY = e.touches[0].clientY;
+      const deltaX = currentX - lastTouchXRef.current;
+      const deltaY = currentY - lastTouchYRef.current;
+
+      const fitWidthScale = getFitWidthScale();
+      // Smooth 1-finger drag-to-pan in all 360 degrees when zoomed in
+      if (scale > fitWidthScale * 1.05 && viewportContainerRef.current) {
+        viewportContainerRef.current.scrollLeft -= deltaX;
+        viewportContainerRef.current.scrollTop -= deltaY;
+      }
+
+      lastTouchXRef.current = currentX;
+      lastTouchYRef.current = currentY;
     }
   };
 
@@ -443,10 +502,19 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     if (e.touches.length < 2) {
       pinchStartDistRef.current = null;
     }
+    if (e.touches.length === 0) {
+      isDraggingRef.current = false;
+      lastTouchXRef.current = null;
+      lastTouchYRef.current = null;
+    }
 
-    // 1-finger horizontal swipe navigation (only when zoom is low to avoid interfering with panning)
+    const fitWidthScale = getFitWidthScale();
+    const isZoomed = scale > fitWidthScale * 1.05;
+
+    // 1-finger horizontal swipe navigation:
+    // ONLY allowed when scale <= fitWidthScale * 1.05 to prevent accidental page flips when zoomed in!
     if (
-      scale <= 1.25 &&
+      !isZoomed &&
       swipeStartXRef.current !== null &&
       swipeStartYRef.current !== null &&
       e.changedTouches.length === 1
@@ -461,9 +529,48 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           goToPrevPage();
         }
       }
-      swipeStartXRef.current = null;
-      swipeStartYRef.current = null;
     }
+
+    swipeStartXRef.current = null;
+    swipeStartYRef.current = null;
+  };
+
+  const handleTouchCancel = () => {
+    pinchStartDistRef.current = null;
+    isDraggingRef.current = false;
+    lastTouchXRef.current = null;
+    lastTouchYRef.current = null;
+    swipeStartXRef.current = null;
+    swipeStartYRef.current = null;
+  };
+
+  // Mouse drag panning support (for desktop / trackpad users when zoomed in)
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    const fitWidthScale = getFitWidthScale();
+    if (scale > fitWidthScale * 1.05 && e.button === 0) {
+      isMouseDownRef.current = true;
+      lastMouseXRef.current = e.clientX;
+      lastMouseYRef.current = e.clientY;
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isMouseDownRef.current && lastMouseXRef.current !== null && lastMouseYRef.current !== null) {
+      const deltaX = e.clientX - lastMouseXRef.current;
+      const deltaY = e.clientY - lastMouseYRef.current;
+      if (viewportContainerRef.current) {
+        viewportContainerRef.current.scrollLeft -= deltaX;
+        viewportContainerRef.current.scrollTop -= deltaY;
+      }
+      lastMouseXRef.current = e.clientX;
+      lastMouseYRef.current = e.clientY;
+    }
+  };
+
+  const handleMouseUp = () => {
+    isMouseDownRef.current = false;
+    lastMouseXRef.current = null;
+    lastMouseYRef.current = null;
   };
 
   if (!isOpen || !doc) return null;
@@ -589,7 +696,15 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           onTouchStart={handleTouchStart}
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
-          className={`absolute inset-0 overflow-auto flex items-start justify-center p-3 transition-colors duration-300 ${viewportBgClass}`}
+          onTouchCancel={handleTouchCancel}
+          onMouseDown={handleMouseDown}
+          onMouseMove={handleMouseMove}
+          onMouseUp={handleMouseUp}
+          onMouseLeave={handleMouseUp}
+          style={{ WebkitOverflowScrolling: 'touch' }}
+          className={`absolute inset-0 overflow-auto overscroll-contain touch-pan-x touch-pan-y transition-colors duration-300 ${viewportBgClass} ${
+            scale > getFitWidthScale() * 1.05 ? 'cursor-grab active:cursor-grabbing' : ''
+          }`}
         >
           {/* Loading Spinner */}
           {isLoadingPdf && (
@@ -600,44 +715,50 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           )}
 
           {/* Error State */}
-          {pdfError && (
-            <div className="max-w-sm m-auto p-5 rounded-2xl bg-zinc-900 border border-zinc-800 text-center space-y-3">
-              <div className="w-12 h-12 rounded-full bg-rose-500/10 text-rose-500 flex items-center justify-center mx-auto">
-                <AlertCircle className="w-6 h-6" />
+          {pdfError ? (
+            <div className="min-w-full min-h-full flex items-center justify-center p-4">
+              <div className="max-w-sm p-5 rounded-2xl bg-zinc-900 border border-zinc-800 text-center space-y-3">
+                <div className="w-12 h-12 rounded-full bg-rose-500/10 text-rose-500 flex items-center justify-center mx-auto">
+                  <AlertCircle className="w-6 h-6" />
+                </div>
+                <h3 className="text-sm font-semibold text-zinc-200">Failed to render PDF</h3>
+                <p className="text-xs text-zinc-400">{pdfError}</p>
+                <button
+                  type="button"
+                  onClick={initPdfDocument}
+                  className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-xs font-semibold text-white shadow-sm"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Retry</span>
+                </button>
               </div>
-              <h3 className="text-sm font-semibold text-zinc-200">Failed to render PDF</h3>
-              <p className="text-xs text-zinc-400">{pdfError}</p>
-              <button
-                type="button"
-                onClick={initPdfDocument}
-                className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-xs font-semibold text-white shadow-sm"
+            </div>
+          ) : (
+            /* Sizing container: min-w-full min-h-full w-max h-max flex items-center justify-center p-6
+               Ensures full 360-degree scrollability from true top-left corner without clipping data loss */
+            <div className="min-w-full min-h-full w-max h-max flex items-center justify-center p-6">
+              {/* Page Canvas Rendering Wrapper */}
+              <div
+                className={`relative max-w-none transition-transform duration-100 ease-out rounded-lg overflow-hidden ${canvasContainerClass}`}
+                style={{
+                  filter: canvasFilter,
+                  transformOrigin: 'center center'
+                }}
               >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Retry</span>
-              </button>
+                {/* Canvas Element */}
+                <canvas ref={canvasRef} className="block max-w-none" />
+
+                {/* Rendering overlay indicator */}
+                {isRenderingPage && (
+                  <div className="absolute inset-0 bg-black/10 backdrop-blur-[1px] flex items-center justify-center">
+                    <div className="p-2 rounded-full bg-zinc-900/70 text-zinc-300 shadow">
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
-
-          {/* Page Canvas Rendering Wrapper */}
-          <div
-            className={`my-auto mx-auto relative max-w-none transition-transform duration-100 ease-out rounded-lg overflow-hidden ${canvasContainerClass}`}
-            style={{
-              filter: canvasFilter,
-              transformOrigin: 'center center'
-            }}
-          >
-            {/* Canvas Element */}
-            <canvas ref={canvasRef} className="block max-w-none" />
-
-            {/* Rendering overlay indicator */}
-            {isRenderingPage && (
-              <div className="absolute inset-0 bg-black/10 backdrop-blur-[1px] flex items-center justify-center">
-                <div className="p-2 rounded-full bg-zinc-900/70 text-zinc-300 shadow">
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                </div>
-              </div>
-            )}
-          </div>
         </div>
 
         {/* Floating Zoom & Fit Controls (Always pinned at bottom-right, razor-sharp dark contrast) */}

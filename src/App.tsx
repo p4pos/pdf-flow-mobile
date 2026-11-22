@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { 
   Plus, 
   BookOpen, 
@@ -58,7 +58,26 @@ function MainAppContent() {
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
   // Navigation & View Filters
-  const [activeTab, setActiveTab] = useState<TabType>('library');
+  const [activeTab, setActiveTab] = useState<TabType>(() => {
+    try {
+      const saved = localStorage.getItem('pdfflow_active_tab');
+      if (saved === 'library' || saved === 'notes' || saved === 'groups' || saved === 'favorites') {
+        return saved as TabType;
+      }
+    } catch (e) {
+      // ignore
+    }
+    return 'library';
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('pdfflow_active_tab', activeTab);
+    } catch (e) {
+      // ignore
+    }
+  }, [activeTab]);
+
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
@@ -69,6 +88,7 @@ function MainAppContent() {
   const [isViewerOpen, setIsViewerOpen] = useState<boolean>(false);
   const [viewerDoc, setViewerDoc] = useState<PdfDocument | null>(null);
   const [viewerInitialPage, setViewerInitialPage] = useState<number>(1);
+  const hasRestoredViewerSessionRef = useRef<boolean>(false);
 
   const [isUploadOpen, setIsUploadOpen] = useState<boolean>(false);
   const [isGroupManagerOpen, setIsGroupManagerOpen] = useState<boolean>(false);
@@ -85,6 +105,20 @@ function MainAppContent() {
   // Privacy PIN Modal
   const [isPinModalOpen, setIsPinModalOpen] = useState<boolean>(false);
   const [pinModalMode, setPinModalMode] = useState<'unlock' | 'set' | 'change'>('unlock');
+
+  const applyTheme = (theme: ReaderTheme) => {
+    const root = document.documentElement;
+    if (theme === 'dark') {
+      root.classList.add('dark');
+      root.classList.remove('sepia');
+    } else if (theme === 'sepia') {
+      root.classList.remove('dark');
+      root.classList.add('sepia');
+    } else {
+      root.classList.remove('dark');
+      root.classList.remove('sepia');
+    }
+  };
 
   // Load All Data
   const loadData = useCallback(async () => {
@@ -113,6 +147,30 @@ function MainAppContent() {
 
       // Apply theme
       applyTheme(loadedSettings.theme);
+
+      // Restore active reader session if present in sessionStorage on initial mount
+      if (!hasRestoredViewerSessionRef.current) {
+        hasRestoredViewerSessionRef.current = true;
+        try {
+          const savedSession = sessionStorage.getItem('pdfflow_viewer_session');
+          if (savedSession) {
+            const parsed = JSON.parse(savedSession);
+            if (parsed && typeof parsed.docId === 'string') {
+              const fullDoc = await getDocumentById(parsed.docId);
+              if (fullDoc) {
+                const restoredPage = typeof parsed.page === 'number' && parsed.page > 0 ? parsed.page : 1;
+                setViewerDoc(fullDoc);
+                setViewerInitialPage(restoredPage);
+                setIsViewerOpen(true);
+              } else {
+                sessionStorage.removeItem('pdfflow_viewer_session');
+              }
+            }
+          }
+        } catch (sessionErr) {
+          console.warn('Failed to restore viewer session:', sessionErr);
+        }
+      }
     } catch (err) {
       console.error('Failed to load application data:', err);
       error('Failed to load documents');
@@ -124,20 +182,6 @@ function MainAppContent() {
   useEffect(() => {
     loadData();
   }, [loadData]);
-
-  const applyTheme = (theme: ReaderTheme) => {
-    const root = document.documentElement;
-    if (theme === 'dark') {
-      root.classList.add('dark');
-      root.classList.remove('sepia');
-    } else if (theme === 'sepia') {
-      root.classList.remove('dark');
-      root.classList.add('sepia');
-    } else {
-      root.classList.remove('dark');
-      root.classList.remove('sepia');
-    }
-  };
 
   // Open PDF Viewer
   const handleOpenDocument = async (docId: string, initialPage: number = 1) => {
@@ -154,11 +198,182 @@ function MainAppContent() {
       setViewerDoc(fullDoc);
       setViewerInitialPage(initialPage);
       setIsViewerOpen(true);
+
+      // Persist active reader session to sessionStorage
+      try {
+        sessionStorage.setItem(
+          'pdfflow_viewer_session',
+          JSON.stringify({ docId, page: initialPage })
+        );
+      } catch (e) {
+        console.warn('Failed to persist viewer session:', e);
+      }
     } catch (err) {
       console.error('Failed to open document:', err);
       error('Could not render PDF');
     }
   };
+
+  // Close PDF Viewer and clear persisted session
+  const handleCloseViewer = useCallback(() => {
+    setIsViewerOpen(false);
+    setViewerDoc(null);
+    try {
+      sessionStorage.removeItem('pdfflow_viewer_session');
+    } catch (e) {
+      // ignore
+    }
+    loadData();
+  }, [loadData]);
+
+  // Persist updated viewer page to sessionStorage
+  const handleViewerPageChange = useCallback((page: number) => {
+    if (viewerDoc) {
+      try {
+        sessionStorage.setItem(
+          'pdfflow_viewer_session',
+          JSON.stringify({ docId: viewerDoc.id, page })
+        );
+      } catch (e) {
+        console.warn('Failed to update viewer page in session:', e);
+      }
+    }
+  }, [viewerDoc]);
+
+  // Hardware back button and popstate state tracker
+  const backHandlerStateRef = useRef({
+    isViewerOpen,
+    isMenuOpen,
+    isCoverEditorOpen,
+    isRenameOpen,
+    isUploadOpen,
+    isGroupManagerOpen,
+    isSettingsOpen,
+    isNotesPreviewOpen,
+    isChangeGroupOpen,
+    isPinModalOpen,
+    activeTab,
+    searchQuery,
+  });
+
+  useEffect(() => {
+    backHandlerStateRef.current = {
+      isViewerOpen,
+      isMenuOpen,
+      isCoverEditorOpen,
+      isRenameOpen,
+      isUploadOpen,
+      isGroupManagerOpen,
+      isSettingsOpen,
+      isNotesPreviewOpen,
+      isChangeGroupOpen,
+      isPinModalOpen,
+      activeTab,
+      searchQuery,
+    };
+  });
+
+  const lastBackPressTimeRef = useRef<number>(0);
+
+  // Hardware back button and popstate listener
+  useEffect(() => {
+    const handleBackButton = (e?: Event) => {
+      if (e) {
+        e.preventDefault?.();
+      }
+
+      const state = backHandlerStateRef.current;
+
+      // 1. If isViewerOpen: close reader
+      if (state.isViewerOpen) {
+        handleCloseViewer();
+        return;
+      }
+
+      // 2. Else if any modal is open: close that modal
+      if (state.isMenuOpen) {
+        setIsMenuOpen(false);
+        setSelectedDoc(null);
+        return;
+      }
+      if (state.isCoverEditorOpen) {
+        setIsCoverEditorOpen(false);
+        setSelectedDoc(null);
+        return;
+      }
+      if (state.isRenameOpen) {
+        setIsRenameOpen(false);
+        setSelectedDoc(null);
+        return;
+      }
+      if (state.isUploadOpen) {
+        setIsUploadOpen(false);
+        return;
+      }
+      if (state.isGroupManagerOpen) {
+        setIsGroupManagerOpen(false);
+        return;
+      }
+      if (state.isSettingsOpen) {
+        setIsSettingsOpen(false);
+        return;
+      }
+      if (state.isNotesPreviewOpen) {
+        setIsNotesPreviewOpen(false);
+        setSelectedDoc(null);
+        return;
+      }
+      if (state.isChangeGroupOpen) {
+        setIsChangeGroupOpen(false);
+        setSelectedDoc(null);
+        return;
+      }
+      if (state.isPinModalOpen) {
+        setIsPinModalOpen(false);
+        return;
+      }
+
+      // 3. Else if activeTab !== 'library': switch activeTab back to 'library'
+      if (state.activeTab !== 'library') {
+        setActiveTab('library');
+        setSelectedGroupId(null);
+        setSearchQuery('');
+        return;
+      }
+
+      // 4. Else if searchQuery: clear searchQuery
+      if (state.searchQuery.trim().length > 0) {
+        setSearchQuery('');
+        return;
+      }
+
+      // 5. Else: double-tap back to exit toast (within 2 seconds)
+      const now = Date.now();
+      if (now - lastBackPressTimeRef.current < 2000) {
+        try {
+          const cap = (window as any).Capacitor;
+          if (cap?.App?.exitApp) {
+            cap.App.exitApp();
+          } else if (cap?.Plugins?.App?.exitApp) {
+            cap.Plugins.App.exitApp();
+          }
+        } catch (exitErr) {
+          console.warn('Failed to exit app:', exitErr);
+        }
+      } else {
+        lastBackPressTimeRef.current = now;
+        info('Press back again to exit');
+      }
+    };
+
+    window.addEventListener('androidbackbutton', handleBackButton);
+    window.addEventListener('popstate', handleBackButton);
+
+    return () => {
+      window.removeEventListener('androidbackbutton', handleBackButton);
+      window.removeEventListener('popstate', handleBackButton);
+    };
+  }, [handleCloseViewer, info]);
 
   // Handle Visibility Filter Cycling
   const handleVisibilityFilterChange = (filter: VisibilityFilter) => {
@@ -523,11 +738,7 @@ function MainAppContent() {
           document={viewerDoc}
           initialPage={viewerInitialPage}
           initialTheme={settings.theme}
-          onClose={() => {
-            setIsViewerOpen(false);
-            setViewerDoc(null);
-            loadData();
-          }}
+          onClose={handleCloseViewer}
           onToggleFavorite={(docId, isFav) => {
             handleToggleFavoriteById(docId, isFav);
           }}
@@ -535,6 +746,7 @@ function MainAppContent() {
             setViewerDoc(updated);
             loadData();
           }}
+          onPageChange={handleViewerPageChange}
         />
       )}
 
