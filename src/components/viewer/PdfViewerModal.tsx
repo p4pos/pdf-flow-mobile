@@ -83,11 +83,17 @@ const ContinuousPageCanvas: React.FC<ContinuousPageCanvasProps> = React.memo(
 
             const viewport = page.getViewport({ scale });
             const dpr = typeof window !== 'undefined' ? Math.max(window.devicePixelRatio || 1, 2) : 2;
+            const maxTextureSize = 4096;
+
+            const rawWidth = viewport.width * dpr;
+            const rawHeight = viewport.height * dpr;
+            const downscale = Math.min(1, maxTextureSize / Math.max(rawWidth, rawHeight));
+            const actualDpr = dpr * downscale;
 
             // Render into an offscreen canvas first to avoid any white flash or blank screen
             const offscreenCanvas = document.createElement('canvas');
-            offscreenCanvas.width = Math.floor(viewport.width * dpr);
-            offscreenCanvas.height = Math.floor(viewport.height * dpr);
+            offscreenCanvas.width = Math.floor(viewport.width * actualDpr);
+            offscreenCanvas.height = Math.floor(viewport.height * actualDpr);
 
             const ctx = offscreenCanvas.getContext('2d', { alpha: false });
             if (!ctx) return;
@@ -99,7 +105,7 @@ const ContinuousPageCanvas: React.FC<ContinuousPageCanvasProps> = React.memo(
             const renderContext = {
               canvasContext: ctx,
               viewport,
-              transform: [dpr, 0, 0, dpr, 0, 0] as [number, number, number, number, number, number],
+              transform: [actualDpr, 0, 0, actualDpr, 0, 0] as [number, number, number, number, number, number],
             };
 
             const task = page.render(renderContext);
@@ -236,6 +242,8 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   const isMouseDownRef = useRef<boolean>(false);
   const lastMouseXRef = useRef<number | null>(null);
   const lastMouseYRef = useRef<number | null>(null);
+  const isPinchEndingRef = useRef<boolean>(false);
+  const isScrollLockedRef = useRef<boolean>(false);
 
   // Calculate target scale for fit modes
   const calculateScaleForMode = useCallback(
@@ -250,14 +258,14 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
       if (targetFitMode === 'width') {
         const targetScale = availableWidth / unscaledWidth;
-        return Math.min(Math.max(Math.round(targetScale * 100) / 100, 0.4), 3.5);
+        return Math.min(Math.max(Math.round(targetScale * 100) / 100, 0.4), 8.0);
       } else {
         const verticalPadding = 24;
         const availableHeight = Math.max(containerHeight - verticalPadding, 100);
         const scaleX = availableWidth / unscaledWidth;
         const scaleY = availableHeight / unscaledHeight;
         const targetScale = Math.min(scaleX, scaleY);
-        return Math.min(Math.max(Math.round(targetScale * 100) / 100, 0.35), 3.5);
+        return Math.min(Math.max(Math.round(targetScale * 100) / 100, 0.35), 8.0);
       }
     },
     []
@@ -284,7 +292,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
       const fitWidthScale = getFitWidthScale();
       const minScale = fitWidthScale;
-      const maxScale = Math.max(fitWidthScale * 3.5, 3.5);
+      const maxScale = Math.max(fitWidthScale * 8.0, 6.0);
       const clampedScale = Math.min(Math.max(Math.round(nextScale * 100) / 100, minScale), maxScale);
 
       const rect = container.getBoundingClientRect();
@@ -337,6 +345,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       pendingScrollAnchorRef.current = null;
       const container = viewportContainerRef.current;
       if (container) {
+        isScrollLockedRef.current = true;
         const activePageEl = pageElementsRef.current.get(targetPage);
         let targetScrollLeft = 0;
         let targetScrollTop = 0;
@@ -368,6 +377,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
             container.scrollLeft = targetScrollLeft;
             container.scrollTop = targetScrollTop;
           }
+          setTimeout(() => {
+            isScrollLockedRef.current = false;
+          }, 80);
         });
       }
     }
@@ -466,14 +478,14 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     }
   }, [isOpen, currentPage, onPageChange]);
 
-  // Prevent browser-level pinch-zoom on mobile viewport to ensure buttery smooth custom canvas zoom
+  // Prevent browser-level pinch-zoom and lock native scrolling during pinch and release cooldown
   useEffect(() => {
     const el = viewportContainerRef.current;
     if (!el) return;
 
     const onNativeTouchMove = (e: TouchEvent) => {
-      if (e.touches.length >= 2) {
-        e.preventDefault(); // Lock browser zoom, allow our custom GPU pinch-zoom
+      if (e.touches.length >= 2 || isPinchEndingRef.current) {
+        e.preventDefault(); // Lock browser zoom & prevent asymmetric single-finger scroll flings!
       }
     };
 
@@ -573,7 +585,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
   // Throttled scroll handler: updates current page indicator and manages fast-scroll scrubber visibility
   const handleScroll = useCallback(() => {
-    if (isPinching || pinchStateRef.current) return; // Don't flip current page while pinching!
+    if (isPinching || pinchStateRef.current || isPinchEndingRef.current || isScrollLockedRef.current) return; // Don't flip current page while pinching or during zoom alignment!
     setIsScrolling(true);
     if (scrollTimeoutRef.current) {
       clearTimeout(scrollTimeoutRef.current);
@@ -590,6 +602,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     if (rafIdRef.current) return;
     rafIdRef.current = requestAnimationFrame(() => {
       rafIdRef.current = 0;
+      if (isScrollLockedRef.current || isPinchEndingRef.current) return;
       const scrollCenter = container.scrollTop + container.clientHeight / 2;
 
       let closestPage = currentPage;
@@ -660,12 +673,14 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   // Zoom helpers (anchored around screen center)
   const zoomIn = () => {
     setFitMode('custom');
-    zoomAroundPoint(Math.min(Math.round((scale + 0.25) * 100) / 100, 3.5));
+    const fitWidthScale = getFitWidthScale();
+    const maxScale = Math.max(fitWidthScale * 8.0, 6.0);
+    zoomAroundPoint(Math.min(Math.round((scale + 0.5) * 100) / 100, maxScale));
   };
 
   const zoomOut = () => {
     const fitWidthScale = getFitWidthScale();
-    const nextScale = Math.max(Math.round((scale - 0.25) * 100) / 100, fitWidthScale);
+    const nextScale = Math.max(Math.round((scale - 0.5) * 100) / 100, fitWidthScale);
     setFitMode(nextScale === fitWidthScale ? 'width' : 'custom');
     zoomAroundPoint(nextScale);
   };
@@ -676,13 +691,14 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     zoomAroundPoint(fitScale);
   };
 
-  // Double-tap helper to toggle between fit-width and 2x zoom around tap position
+  // Double-tap helper to toggle between fit-width and 2.5x zoom around tap position
   const handleDoubleTap = (tapClientX?: number, tapClientY?: number) => {
     const fitWidthScale = getFitWidthScale();
+    const maxScale = Math.max(fitWidthScale * 8.0, 6.0);
     const nextScale =
       scale > fitWidthScale * 1.05
         ? fitWidthScale
-        : Math.min(Math.round(fitWidthScale * 2.0 * 100) / 100, 3.5);
+        : Math.min(Math.round(fitWidthScale * 2.5 * 100) / 100, maxScale);
 
     setFitMode(nextScale === fitWidthScale ? 'width' : 'custom');
     zoomAroundPoint(nextScale, tapClientX, tapClientY);
@@ -692,6 +708,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
     if (e.touches.length === 2) {
       // 2 fingers: pinch-to-zoom start
+      isPinchEndingRef.current = false;
       const t1 = e.touches[0];
       const t2 = e.touches[1];
       const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
@@ -702,26 +719,22 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       const midX = (t1.clientX + t2.clientX) / 2 - containerRect.left;
       const midY = (t1.clientY + t2.clientY) / 2 - containerRect.top;
 
+      // Exact pixel coordinates in content wrapper space (focal center between fingers)
+      const originDocX = container.scrollLeft + midX;
+      const originDocY = container.scrollTop + midY;
+
       const activePageEl = pageElementsRef.current.get(currentPage);
-      let originDocX = container.scrollLeft + midX;
-      let originDocY = container.scrollTop + midY;
-      let unscaledPageX = originDocX / scale;
-      let unscaledPageY = originDocY / scale;
+      let unscaledPageX: number;
+      let unscaledPageY: number;
 
       if (activePageEl && mode === 'continuous') {
         const pageTop = activePageEl.offsetTop;
         const pageLeft = activePageEl.offsetLeft;
-        const pageHeight = activePageEl.offsetHeight;
-        const pageWidth = activePageEl.offsetWidth;
-
-        // Strictly lock focal anchor to the currentPage currently being read!
-        const pageRelY = Math.min(Math.max(container.scrollTop + midY - pageTop, 0), pageHeight);
-        const pageRelX = Math.min(Math.max(container.scrollLeft + midX - pageLeft, 0), pageWidth);
-
-        originDocX = pageLeft + pageRelX;
-        originDocY = pageTop + pageRelY;
-        unscaledPageX = pageRelX / scale;
-        unscaledPageY = pageRelY / scale;
+        unscaledPageX = Math.max(0, (originDocX - pageLeft) / scale);
+        unscaledPageY = Math.max(0, (originDocY - pageTop) / scale);
+      } else {
+        unscaledPageX = originDocX / scale;
+        unscaledPageY = originDocY / scale;
       }
 
       pinchStateRef.current = {
@@ -744,7 +757,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
       setIsPinching(true);
       isMouseDownRef.current = false;
-    } else if (e.touches.length === 1 && !pinchStateRef.current) {
+      swipeStartXRef.current = null;
+      swipeStartYRef.current = null;
+    } else if (e.touches.length === 1 && !pinchStateRef.current && !isPinchEndingRef.current) {
       // 1 finger: record position for swipe & double tap
       const touch = e.touches[0];
       swipeStartXRef.current = touch.clientX;
@@ -761,6 +776,11 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   };
 
   const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (isPinchEndingRef.current) {
+      // Shield against lingering single-finger flings during pinch release
+      return;
+    }
+
     if (e.touches.length === 2 && pinchStateRef.current) {
       const t1 = e.touches[0];
       const t2 = e.touches[1];
@@ -789,17 +809,19 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
   const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
     if (pinchStateRef.current && e.touches.length < 2) {
+      // One finger lifted! Enter pinch release shield so the remaining finger cannot fling the page!
+      isPinchEndingRef.current = true;
       const pinch = pinchStateRef.current;
       pinchStateRef.current = null;
       setIsPinching(false);
 
       const fitWidthScale = getFitWidthScale();
       const minScale = fitWidthScale;
-      const maxScale = Math.max(fitWidthScale * 3.5, 3.5);
+      const maxScale = Math.max(fitWidthScale * 8.0, 6.0);
 
       const finalRatio = pinch.lastRatio;
       const rawScale = pinch.startScale * finalRatio;
-      // Clamped strictly to Fit-Width so the user never pinches into tiny 40% cards!
+      // Clamped strictly to [fitWidthScale, fitWidthScale * 8.0]
       const clampedScale = Math.min(Math.max(Math.round(rawScale * 100) / 100, minScale), maxScale);
 
       const finalViewX = pinch.startViewX + pinch.lastDx;
@@ -827,8 +849,16 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       }
     }
 
-    // 1-finger horizontal swipe in Single Page mode
+    if (e.touches.length === 0) {
+      // All fingers have completely left the screen!
+      setTimeout(() => {
+        isPinchEndingRef.current = false;
+      }, 120);
+    }
+
+    // 1-finger horizontal swipe in Single Page mode (only if not ending a pinch)
     if (
+      !isPinchEndingRef.current &&
       mode === 'single' &&
       scale <= getFitWidthScale() * 1.05 &&
       swipeStartXRef.current !== null &&
@@ -848,8 +878,10 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       }
     }
 
-    swipeStartXRef.current = null;
-    swipeStartYRef.current = null;
+    if (e.touches.length === 0) {
+      swipeStartXRef.current = null;
+      swipeStartYRef.current = null;
+    }
   };
 
   const handleTouchCancel = () => {
@@ -860,6 +892,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     }
     pinchStateRef.current = null;
     setIsPinching(false);
+    isPinchEndingRef.current = false;
     swipeStartXRef.current = null;
     swipeStartYRef.current = null;
   };
