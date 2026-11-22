@@ -1,10 +1,19 @@
 import { PdfDocument, PageNote } from '../types';
-import { saveDocument, saveNote, getAllDocuments } from './db';
+import { saveDocument, saveNote, getAllDocuments, getDB } from './db';
 import { createSamplePdf, generateCoverThumbnail } from './pdfService';
 
 export async function seedSampleDataIfEmpty() {
+  const db = await getDB();
+  const flag = await db.get('settings', 'sample_data_seeded');
+  if (flag && (flag.value === true || flag === true || flag.value)) {
+    return;
+  }
+
   const existingDocs = await getAllDocuments();
-  if (existingDocs.length > 0) return;
+  if (existingDocs.length > 0) {
+    await db.put('settings', { key: 'sample_data_seeded', value: true });
+    return;
+  }
 
   try {
     // 1. Getting Started Guide (Visible, Study group)
@@ -97,6 +106,7 @@ export async function seedSampleDataIfEmpty() {
     };
 
     await saveNote(note3);
+    await db.put('settings', { key: 'sample_data_seeded', value: true });
   } catch (error) {
     console.error('Failed to seed sample data:', error);
   }

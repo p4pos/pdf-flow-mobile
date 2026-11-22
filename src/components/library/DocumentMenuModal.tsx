@@ -71,30 +71,14 @@ export const DocumentMenuModal: React.FC<DocumentMenuModalProps> = ({
   if (!isOpen || !doc) return null;
 
   // Toggle Favorite Handler
-  const handleToggleFavorite = async () => {
-    const newFav = !doc.isFavorite;
-    try {
-      await updateDocumentMeta(doc.id, { isFavorite: newFav });
-      const updated = { ...doc, isFavorite: newFav };
-      onToggleFavorite?.(updated);
-      onDocumentUpdated?.(updated);
-    } catch (e) {
-      console.error('Failed to toggle favorite:', e);
-    }
+  const handleToggleFavorite = () => {
+    onToggleFavorite?.(doc);
     onClose();
   };
 
   // Toggle Hidden Visibility Handler
-  const handleToggleVisibility = async () => {
-    const newHidden = !doc.isHidden;
-    try {
-      await updateDocumentMeta(doc.id, { isHidden: newHidden });
-      const updated = { ...doc, isHidden: newHidden };
-      onToggleVisibility?.(updated);
-      onDocumentUpdated?.(updated);
-    } catch (e) {
-      console.error('Failed to toggle visibility:', e);
-    }
+  const handleToggleVisibility = () => {
+    onToggleVisibility?.(doc);
     onClose();
   };
 

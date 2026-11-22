@@ -12,6 +12,21 @@ export interface RenderPageResult {
 }
 
 /**
+ * Gets unscaled page dimensions (at scale = 1.0)
+ */
+export async function getPageDimensions(
+  pdfDoc: pdfjsLib.PDFDocumentProxy,
+  pageNumber: number
+): Promise<{ width: number; height: number }> {
+  const page = await pdfDoc.getPage(pageNumber);
+  const viewport = page.getViewport({ scale: 1.0 });
+  return {
+    width: viewport.width,
+    height: viewport.height,
+  };
+}
+
+/**
  * Loads a PDF document from an ArrayBuffer or Blob
  */
 export async function loadPdf(data: ArrayBuffer | Blob): Promise<pdfjsLib.PDFDocumentProxy> {

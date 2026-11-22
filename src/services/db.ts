@@ -95,6 +95,11 @@ export const DEFAULT_GROUPS: DocumentGroup[] = [
 
 export async function initDefaultData() {
   const db = await getDB();
+  const flag = await db.get('settings', 'groups_initialized');
+  if (flag && (flag.value === true || flag === true || flag.value)) {
+    return;
+  }
+
   const count = await db.count('groups');
   if (count === 0) {
     const tx = db.transaction('groups', 'readwrite');
@@ -103,6 +108,7 @@ export async function initDefaultData() {
     }
     await tx.done;
   }
+  await db.put('settings', { key: 'groups_initialized', value: true });
 }
 
 // Document Operations

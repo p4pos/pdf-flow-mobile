@@ -222,9 +222,48 @@ function MainAppContent() {
     }
   };
 
-  // Filtered Documents
-  const filteredDocuments = useMemo(() => {
+  // Statistics
+  const totalHiddenCount = useMemo(() => documents.filter(d => d.isHidden).length, [documents]);
+  const totalNonHiddenCount = useMemo(() => documents.filter(d => !d.isHidden).length, [documents]);
+  const totalFavoritesCount = useMemo(() => documents.filter(d => d.isFavorite).length, [documents]);
+  const totalNotesCount = useMemo(() => Object.values(notesCountMap).reduce((a, b) => a + b, 0), [notesCountMap]);
+
+  // Documents matching current visibility scope and tab
+  const visibleDocuments = useMemo(() => {
     return documents.filter(doc => {
+      // Visibility Filter
+      if (visibilityFilter === 'hidden') {
+        if (!doc.isHidden) return false;
+        if (settings.pinCode && !isVaultUnlocked) return false;
+      } else {
+        if (doc.isHidden) return false;
+      }
+
+      // Favorites Tab
+      if (activeTab === 'favorites' && !doc.isFavorite) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [documents, visibilityFilter, settings.pinCode, isVaultUnlocked, activeTab]);
+
+  const visibleDocumentsCount = visibleDocuments.length;
+
+  // Group counts map based on active visibility scope
+  const groupCountsMap = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const doc of visibleDocuments) {
+      if (doc.groupId) {
+        counts[doc.groupId] = (counts[doc.groupId] || 0) + 1;
+      }
+    }
+    return counts;
+  }, [visibleDocuments]);
+
+  // Filtered Documents (applies search query and group filter to visible documents)
+  const filteredDocuments = useMemo(() => {
+    return visibleDocuments.filter(doc => {
       // Search Query
       if (searchQuery.trim()) {
         const query = searchQuery.toLowerCase();
@@ -239,45 +278,9 @@ function MainAppContent() {
         return false;
       }
 
-      // Favorites Tab
-      if (activeTab === 'favorites' && !doc.isFavorite) {
-        return false;
-      }
-
-      // Visibility Filter
-      if (visibilityFilter === 'visible' && doc.isHidden) {
-        return false;
-      }
-      if (visibilityFilter === 'hidden') {
-        if (!doc.isHidden) return false;
-        if (settings.pinCode && !isVaultUnlocked) return false;
-      }
-      if (visibilityFilter === 'all') {
-        // If hidden and settings don't show hidden, exclude unless unlocked
-        if (doc.isHidden && !settings.showHidden && !isVaultUnlocked) {
-          return false;
-        }
-      }
-
       return true;
     });
-  }, [documents, searchQuery, selectedGroupId, activeTab, visibilityFilter, isVaultUnlocked, settings.showHidden, settings.pinCode]);
-
-  // Statistics
-  const totalHiddenCount = useMemo(() => documents.filter(d => d.isHidden).length, [documents]);
-  const totalFavoritesCount = useMemo(() => documents.filter(d => d.isFavorite).length, [documents]);
-  const totalNotesCount = useMemo(() => Object.values(notesCountMap).reduce((a, b) => a + b, 0), [notesCountMap]);
-
-  // Group counts map
-  const groupCountsMap = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const doc of documents) {
-      if (doc.groupId) {
-        counts[doc.groupId] = (counts[doc.groupId] || 0) + 1;
-      }
-    }
-    return counts;
-  }, [documents]);
+  }, [visibleDocuments, searchQuery, selectedGroupId]);
 
   return (
     <div className="min-h-screen bg-ios-bg dark:bg-ios-darkBg text-zinc-900 dark:text-zinc-100 flex flex-col font-sans transition-colors duration-200">
@@ -292,7 +295,8 @@ function MainAppContent() {
         onVisibilityFilterChange={handleVisibilityFilterChange}
         onOpenSettings={() => setIsSettingsOpen(true)}
         hiddenCount={totalHiddenCount}
-        totalCount={documents.length}
+        totalCount={visibilityFilter === 'hidden' ? totalHiddenCount : totalNonHiddenCount}
+        placeholder={activeTab === 'notes' ? 'Search notes, doc titles, page numbers...' : 'Search documents, notes, tags...'}
       />
 
       {/* Main Tab Content */}
@@ -305,7 +309,7 @@ function MainAppContent() {
               groups={groups}
               selectedGroupId={selectedGroupId}
               onSelectGroup={setSelectedGroupId}
-              totalCount={documents.length}
+              totalCount={visibleDocumentsCount}
               groupCounts={groupCountsMap}
               onAddGroup={() => setIsGroupManagerOpen(true)}
             />
@@ -414,12 +418,15 @@ function MainAppContent() {
 
         {/* TAB 2: ALL NOTES TAB */}
         {activeTab === 'notes' && (
-          <div className="px-4 py-3">
-            <AllNotesView
-              onOpenDocument={(docId, pageNum) => handleOpenDocument(docId, pageNum)}
-              activeTab={activeTab}
-            />
-          </div>
+          <AllNotesView
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+            viewMode={viewMode}
+            onOpenDocument={(docId, pageNum) => handleOpenDocument(docId, pageNum)}
+            onSwitchToLibrary={() => setActiveTab('library')}
+            onNotesChanged={loadData}
+            activeTab={activeTab}
+          />
         )}
 
         {/* TAB 3: GROUPS TAB */}
@@ -497,6 +504,9 @@ function MainAppContent() {
       <TabBar
         activeTab={activeTab}
         onTabChange={tab => {
+          if (tab !== activeTab) {
+            setSearchQuery('');
+          }
           setActiveTab(tab);
           if (tab === 'library') setSelectedGroupId(null);
         }}
@@ -555,10 +565,12 @@ function MainAppContent() {
           onToggleFavorite={d => {
             handleToggleFavorite(d);
             setIsMenuOpen(false);
+            setSelectedDoc(null);
           }}
           onToggleVisibility={d => {
             handleToggleHidden(d);
             setIsMenuOpen(false);
+            setSelectedDoc(null);
           }}
           onDelete={d => {
             handleDeleteDocument(d.id);

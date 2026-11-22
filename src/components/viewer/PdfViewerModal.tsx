@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { PdfDocument, PageNote, ReaderTheme } from '../../types';
-import { loadPdf, renderPage, createSamplePdf } from '../../services/pdfService';
+import { loadPdf, renderPage, createSamplePdf, getPageDimensions } from '../../services/pdfService';
 import { getDocumentBlob, updateDocumentMeta, getNotesForDocument } from '../../services/db';
 import { PageNotesSheet } from './PageNotesSheet';
 import {
@@ -62,13 +62,53 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
   const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
   const renderSequenceRef = useRef<number>(0);
   const viewportContainerRef = useRef<HTMLDivElement | null>(null);
+  const pageDimensionsRef = useRef<Map<number, { width: number; height: number }>>(new Map());
+  const lastRenderedKeyRef = useRef<string>('');
 
   // Gesture state refs
   const pinchStartDistRef = useRef<number | null>(null);
-  const pinchStartScaleRef = useRef<number>(1.2);
+  const pinchStartScaleRef = useRef<number>(1.0);
   const lastTapTimeRef = useRef<number>(0);
   const swipeStartXRef = useRef<number | null>(null);
   const swipeStartYRef = useRef<number | null>(null);
+
+  // Helper to calculate target scale based on unscaled page dimensions and mode
+  const calculateScaleForMode = useCallback(
+    (unscaledWidth: number, unscaledHeight: number, mode: 'width' | 'page'): number => {
+      const containerWidth = viewportContainerRef.current?.clientWidth || window.innerWidth;
+      const containerHeight =
+        viewportContainerRef.current?.clientHeight || (window.innerHeight - 130);
+
+      // Mobile padding: 24px total for compact screens, 32px for larger displays
+      const horizontalPadding = containerWidth <= 480 ? 24 : 32;
+      const availableWidth = Math.max(containerWidth - horizontalPadding, 100);
+
+      if (mode === 'width') {
+        const targetScale = availableWidth / unscaledWidth;
+        return Math.min(Math.max(Math.round(targetScale * 100) / 100, 0.4), 3.0);
+      } else {
+        const verticalPadding = 24;
+        const availableHeight = Math.max(containerHeight - verticalPadding, 100);
+        const scaleX = availableWidth / unscaledWidth;
+        const scaleY = availableHeight / unscaledHeight;
+        const targetScale = Math.min(scaleX, scaleY);
+        return Math.min(Math.max(Math.round(targetScale * 100) / 100, 0.35), 3.0);
+      }
+    },
+    []
+  );
+
+  // Cached retrieval of unscaled page dimensions
+  const getPageDimensionsCached = useCallback(
+    async (pdf: pdfjsLib.PDFDocumentProxy, pageNum: number): Promise<{ width: number; height: number }> => {
+      const cached = pageDimensionsRef.current.get(pageNum);
+      if (cached) return cached;
+      const dims = await getPageDimensions(pdf, pageNum);
+      pageDimensionsRef.current.set(pageNum, dims);
+      return dims;
+    },
+    []
+  );
 
   // Sync state when document or modal open changes
   useEffect(() => {
@@ -77,7 +117,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       setTotalPages(doc.pageCount || 1);
       setIsFavorite(doc.isFavorite);
       setPdfError(null);
-      setScale(1.2);
+      setFitMode('width');
+      lastRenderedKeyRef.current = '';
+      pageDimensionsRef.current.clear();
 
       // Record last opened timestamp
       updateDocumentMeta(doc.id, { lastOpened: Date.now() }).catch(() => {});
@@ -85,12 +127,14 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       // Load document notes
       loadDocumentNotes();
 
-      // Load PDF proxy
+      // Load PDF proxy and auto fit-to-width
       initPdfDocument();
     } else {
       // Clean up when closed
       pdfDocRef.current = null;
       renderSequenceRef.current++;
+      lastRenderedKeyRef.current = '';
+      pageDimensionsRef.current.clear();
     }
   }, [isOpen, doc?.id]);
 
@@ -132,8 +176,14 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       setTotalPages(proxy.numPages);
       setIsLoadingPdf(false);
 
-      // Trigger first render
-      renderCurrentPage(proxy, currentPage, scale);
+      // Auto fit-to-width on initial load
+      const startPage = initialPage > 0 ? Math.min(initialPage, proxy.numPages) : 1;
+      const dims = await getPageDimensionsCached(proxy, startPage);
+      const initialScale = calculateScaleForMode(dims.width, dims.height, 'width');
+
+      setFitMode('width');
+      setScale(initialScale);
+      renderCurrentPage(proxy, startPage, initialScale);
     } catch (err: any) {
       console.error('Failed to load PDF document:', err);
       setPdfError(err?.message || 'Could not load PDF document.');
@@ -148,15 +198,21 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
       const canvas = canvasRef.current;
       if (!currentDoc || !canvas) return;
 
+      const clampedPage = Math.min(Math.max(pageNum, 1), currentDoc.numPages);
+      const renderKey = `${clampedPage}@${zoomScale.toFixed(2)}`;
+      if (lastRenderedKeyRef.current === renderKey) {
+        return;
+      }
+
       const sequence = ++renderSequenceRef.current;
       setIsRenderingPage(true);
 
       try {
-        const clampedPage = Math.min(Math.max(pageNum, 1), currentDoc.numPages);
         await renderPage(currentDoc, clampedPage, canvas, zoomScale);
 
         // Check if another render superseded this one
         if (sequence === renderSequenceRef.current) {
+          lastRenderedKeyRef.current = renderKey;
           setIsRenderingPage(false);
         }
       } catch (err: any) {
@@ -170,12 +226,64 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     []
   );
 
-  // Trigger page render when page or scale changes
+  // Trigger page render or scale update when page changes
+  useEffect(() => {
+    if (!pdfDocRef.current || isLoadingPdf) return;
+
+    let isCancelled = false;
+
+    if (fitMode === 'custom') {
+      renderCurrentPage(pdfDocRef.current, currentPage, scale);
+      return;
+    }
+
+    // Auto fit for this page
+    getPageDimensionsCached(pdfDocRef.current, currentPage).then((dims) => {
+      if (isCancelled) return;
+      const targetScale = calculateScaleForMode(dims.width, dims.height, fitMode);
+      if (Math.abs(targetScale - scale) > 0.02) {
+        setScale(targetScale);
+      } else {
+        renderCurrentPage(pdfDocRef.current, currentPage, scale);
+      }
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [currentPage, fitMode, isLoadingPdf, calculateScaleForMode, getPageDimensionsCached, renderCurrentPage]);
+
+  // Trigger page render when scale changes
   useEffect(() => {
     if (pdfDocRef.current && !isLoadingPdf) {
       renderCurrentPage(pdfDocRef.current, currentPage, scale);
     }
-  }, [currentPage, scale, isLoadingPdf, renderCurrentPage]);
+  }, [scale, currentPage, isLoadingPdf, renderCurrentPage]);
+
+  // Re-calculate fit scale when window or device orientation changes
+  useEffect(() => {
+    if (!isOpen) return;
+
+    let resizeTimer: any;
+    const handleResize = () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(async () => {
+        if (fitMode !== 'custom' && pdfDocRef.current) {
+          const dims = await getPageDimensionsCached(pdfDocRef.current, currentPage);
+          const newScale = calculateScaleForMode(dims.width, dims.height, fitMode);
+          if (Math.abs(newScale - scale) > 0.02) {
+            setScale(newScale);
+          }
+        }
+      }, 150);
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => {
+      clearTimeout(resizeTimer);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [isOpen, fitMode, currentPage, scale, calculateScaleForMode, getPageDimensionsCached]);
 
   // Page navigation helpers
   const goToNextPage = () => {
@@ -195,17 +303,37 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     setCurrentPage(clamped);
   };
 
+  // Toggle between Fit Width and Fit Page
+  const toggleFitMode = async () => {
+    const nextMode = fitMode === 'width' ? 'page' : 'width';
+    setFitMode(nextMode);
+    if (pdfDocRef.current) {
+      const dims = await getPageDimensionsCached(pdfDocRef.current, currentPage);
+      const nextScale = calculateScaleForMode(dims.width, dims.height, nextMode);
+      setScale(nextScale);
+    }
+  };
+
   // Zoom helpers
   const zoomIn = () => {
+    setFitMode('custom');
     setScale((prev) => Math.min(Math.round((prev + 0.25) * 100) / 100, 3.5));
   };
 
   const zoomOut = () => {
-    setScale((prev) => Math.max(Math.round((prev - 0.25) * 100) / 100, 0.75));
+    setFitMode('custom');
+    setScale((prev) => Math.max(Math.round((prev - 0.25) * 100) / 100, 0.4));
   };
 
-  const resetZoom = () => {
-    setScale(1.2);
+  const resetZoom = async () => {
+    setFitMode('width');
+    if (pdfDocRef.current) {
+      const dims = await getPageDimensionsCached(pdfDocRef.current, currentPage);
+      const fitScale = calculateScaleForMode(dims.width, dims.height, 'width');
+      setScale(fitScale);
+    } else {
+      setScale(1.0);
+    }
   };
 
   // Theme toggle cycle: light -> sepia -> dark -> light
@@ -259,6 +387,20 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, isNotesOpen, currentPage, totalPages]);
 
+  // Double-tap helper to toggle between fit-width and detail zoom
+  const handleDoubleTap = async () => {
+    if (!pdfDocRef.current) return;
+    const dims = await getPageDimensionsCached(pdfDocRef.current, currentPage);
+    const fitWidthScale = calculateScaleForMode(dims.width, dims.height, 'width');
+    if (scale > fitWidthScale * 1.15) {
+      setFitMode('width');
+      setScale(fitWidthScale);
+    } else {
+      setFitMode('custom');
+      setScale(Math.min(Math.round(fitWidthScale * 1.8 * 100) / 100, 3.0));
+    }
+  };
+
   // Touch handlers: Pinch-to-zoom, Double-tap, and 1-finger horizontal swipe
   const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
     if (e.touches.length === 2) {
@@ -276,8 +418,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
       const now = Date.now();
       if (now - lastTapTimeRef.current < 300) {
-        // Double tap! Toggle between 1.0 and 1.8
-        setScale((prev) => (prev > 1.2 ? 1.0 : 1.8));
+        handleDoubleTap();
         lastTapTimeRef.current = 0;
       } else {
         lastTapTimeRef.current = now;
@@ -292,7 +433,8 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
         e.touches[0].clientY - e.touches[1].clientY
       );
       const ratio = dist / pinchStartDistRef.current;
-      const targetScale = Math.min(Math.max(pinchStartScaleRef.current * ratio, 0.75), 3.5);
+      const targetScale = Math.min(Math.max(pinchStartScaleRef.current * ratio, 0.4), 3.5);
+      setFitMode('custom');
       setScale(Math.round(targetScale * 100) / 100);
     }
   };
@@ -351,39 +493,60 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-zinc-950 text-zinc-100 select-none overflow-hidden">
-      {/* Top Header (Frosted Glass, Mobile Friendly) */}
-      <header className="relative z-20 w-full glass-nav bg-zinc-950/85 backdrop-blur-md border-b border-zinc-800/80 px-3 py-2.5 pt-safe flex items-center justify-between gap-2 shadow-sm">
+      {/* Top Header (Solid/frosted dark reader bar, high-contrast in all themes) */}
+      <header className="relative z-20 w-full bg-zinc-950/95 backdrop-blur-md border-b border-zinc-800 text-zinc-100 px-3 py-2.5 pt-safe flex items-center justify-between gap-2 shadow-lg">
         {/* Left: Close Button */}
         <button
           type="button"
           onClick={onClose}
-          className="p-2 -ml-1 rounded-full text-zinc-300 hover:text-white hover:bg-zinc-800/80 active:scale-90 transition-all"
+          className="p-2 -ml-1 rounded-full text-zinc-200 hover:text-white hover:bg-zinc-800/90 active:scale-90 transition-all"
           aria-label="Close viewer"
         >
-          <ChevronLeft className="w-6 h-6" />
+          <ChevronLeft className="w-6 h-6 text-white" />
         </button>
 
         {/* Center: Truncated Title & Page Indicator */}
         <div className="flex-1 min-w-0 text-center px-1">
-          <h1 className="text-xs sm:text-sm font-semibold text-zinc-100 truncate max-w-[200px] sm:max-w-xs mx-auto">
+          <h1 className="text-xs sm:text-sm font-semibold text-white truncate max-w-[180px] sm:max-w-xs mx-auto">
             {doc.title || doc.fileName}
           </h1>
-          <p className="text-[11px] text-zinc-400 font-medium">
+          <p className="text-[11px] text-zinc-300 font-medium">
             Page {currentPage} of {totalPages}
           </p>
         </div>
 
-        {/* Right Actions: Theme Toggle, Notes Button with Badge, Favorite */}
+        {/* Right Actions: Fit Toggle, Theme Toggle, Notes Button with Badge, Favorite */}
         <div className="flex items-center space-x-1 shrink-0">
+          {/* Quick Fit Width / Page Toggle */}
+          <button
+            type="button"
+            onClick={toggleFitMode}
+            className="p-2 rounded-xl text-zinc-200 hover:text-white hover:bg-zinc-800/80 active:scale-95 transition-all"
+            title={
+              fitMode === 'width'
+                ? 'Fit Width active. Tap for Fit Page'
+                : fitMode === 'page'
+                ? 'Fit Page active. Tap for Fit Width'
+                : 'Tap to Fit Width'
+            }
+            aria-label="Toggle Fit Mode"
+          >
+            {fitMode === 'page' ? (
+              <StretchHorizontal className="w-4 h-4 text-blue-400" />
+            ) : (
+              <Minimize2 className="w-4 h-4 text-emerald-400" />
+            )}
+          </button>
+
           {/* Theme Toggle Button */}
           <button
             type="button"
             onClick={cycleTheme}
-            className="p-2 rounded-xl text-zinc-300 hover:text-white hover:bg-zinc-800/70 active:scale-95 transition-all"
+            className="p-2 rounded-xl text-zinc-200 hover:text-white hover:bg-zinc-800/80 active:scale-95 transition-all"
             title={`Reading theme: ${theme} (tap to cycle)`}
           >
             {theme === 'light' && <Sun className="w-4 h-4 text-amber-400" />}
-            {theme === 'sepia' && <BookOpen className="w-4 h-4 text-amber-600" />}
+            {theme === 'sepia' && <BookOpen className="w-4 h-4 text-amber-500" />}
             {theme === 'dark' && <Moon className="w-4 h-4 text-sky-400" />}
           </button>
 
@@ -391,12 +554,12 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           <button
             type="button"
             onClick={() => setIsNotesOpen(true)}
-            className="relative p-2 rounded-xl text-zinc-300 hover:text-white hover:bg-zinc-800/70 active:scale-95 transition-all"
+            className="relative p-2 rounded-xl text-zinc-200 hover:text-white hover:bg-zinc-800/80 active:scale-95 transition-all"
             title={`Page notes (${currentNotesCount} notes on page ${currentPage})`}
           >
-            <StickyNote className="w-4 h-4" />
+            <StickyNote className="w-4 h-4 text-zinc-200" />
             {currentNotesCount > 0 && (
-              <span className="absolute 0 top-0.5 right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-amber-500 text-zinc-950 text-[10px] font-extrabold flex items-center justify-center shadow-md animate-in zoom-in-50">
+              <span className="absolute top-0.5 right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-amber-400 text-zinc-950 text-[10px] font-black flex items-center justify-center shadow-md animate-in zoom-in-50">
                 {currentNotesCount}
               </span>
             )}
@@ -406,113 +569,147 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           <button
             type="button"
             onClick={handleToggleFavorite}
-            className="p-2 rounded-xl text-zinc-300 hover:text-white hover:bg-zinc-800/70 active:scale-95 transition-all"
+            className="p-2 rounded-xl text-zinc-200 hover:text-white hover:bg-zinc-800/80 active:scale-95 transition-all"
             title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
           >
             <Heart
               className={`w-4 h-4 transition-colors ${
-                isFavorite ? 'text-rose-500 fill-rose-500' : 'text-zinc-400'
+                isFavorite ? 'text-rose-500 fill-rose-500' : 'text-zinc-300 hover:text-white'
               }`}
             />
           </button>
         </div>
       </header>
 
-      {/* Main Canvas Viewport with Touch Gestures */}
-      <div
-        ref={viewportContainerRef}
-        onTouchStart={handleTouchStart}
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        className={`flex-1 relative overflow-auto flex items-center justify-center p-3 transition-colors duration-300 ${viewportBgClass}`}
-      >
-        {/* Loading Spinner */}
-        {isLoadingPdf && (
-          <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/70 backdrop-blur-sm">
-            <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-3" />
-            <p className="text-sm font-medium text-zinc-300">Opening document...</p>
-          </div>
-        )}
-
-        {/* Error State */}
-        {pdfError && (
-          <div className="max-w-sm mx-auto p-5 rounded-2xl bg-zinc-900 border border-zinc-800 text-center space-y-3">
-            <div className="w-12 h-12 rounded-full bg-rose-500/10 text-rose-500 flex items-center justify-center mx-auto">
-              <AlertCircle className="w-6 h-6" />
-            </div>
-            <h3 className="text-sm font-semibold text-zinc-200">Failed to render PDF</h3>
-            <p className="text-xs text-zinc-400">{pdfError}</p>
-            <button
-              type="button"
-              onClick={initPdfDocument}
-              className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-xs font-semibold text-white shadow-sm"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>Retry</span>
-            </button>
-          </div>
-        )}
-
-        {/* Page Canvas Rendering Wrapper */}
+      {/* Main Canvas Viewport Area */}
+      <div className="flex-1 relative overflow-hidden">
+        {/* Scrollable Viewport with Touch Gestures */}
         <div
-          className={`relative max-w-none transition-transform duration-100 ease-out rounded-lg overflow-hidden ${canvasContainerClass}`}
-          style={{
-            filter: canvasFilter,
-            transformOrigin: 'center center'
-          }}
+          ref={viewportContainerRef}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          className={`absolute inset-0 overflow-auto flex items-start justify-center p-3 transition-colors duration-300 ${viewportBgClass}`}
         >
-          {/* Canvas Element */}
-          <canvas ref={canvasRef} className="block max-w-none" />
-
-          {/* Rendering overlay indicator */}
-          {isRenderingPage && (
-            <div className="absolute inset-0 bg-black/10 backdrop-blur-[1px] flex items-center justify-center">
-              <div className="p-2 rounded-full bg-zinc-900/70 text-zinc-300 shadow">
-                <Loader2 className="w-5 h-5 animate-spin" />
-              </div>
+          {/* Loading Spinner */}
+          {isLoadingPdf && (
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/70 backdrop-blur-sm">
+              <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-3" />
+              <p className="text-sm font-medium text-zinc-200">Opening document...</p>
             </div>
           )}
+
+          {/* Error State */}
+          {pdfError && (
+            <div className="max-w-sm m-auto p-5 rounded-2xl bg-zinc-900 border border-zinc-800 text-center space-y-3">
+              <div className="w-12 h-12 rounded-full bg-rose-500/10 text-rose-500 flex items-center justify-center mx-auto">
+                <AlertCircle className="w-6 h-6" />
+              </div>
+              <h3 className="text-sm font-semibold text-zinc-200">Failed to render PDF</h3>
+              <p className="text-xs text-zinc-400">{pdfError}</p>
+              <button
+                type="button"
+                onClick={initPdfDocument}
+                className="inline-flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-xs font-semibold text-white shadow-sm"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Retry</span>
+              </button>
+            </div>
+          )}
+
+          {/* Page Canvas Rendering Wrapper */}
+          <div
+            className={`my-auto mx-auto relative max-w-none transition-transform duration-100 ease-out rounded-lg overflow-hidden ${canvasContainerClass}`}
+            style={{
+              filter: canvasFilter,
+              transformOrigin: 'center center'
+            }}
+          >
+            {/* Canvas Element */}
+            <canvas ref={canvasRef} className="block max-w-none" />
+
+            {/* Rendering overlay indicator */}
+            {isRenderingPage && (
+              <div className="absolute inset-0 bg-black/10 backdrop-blur-[1px] flex items-center justify-center">
+                <div className="p-2 rounded-full bg-zinc-900/70 text-zinc-300 shadow">
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Floating Zoom Controls (+ / - / Reset) */}
-        <div className="absolute bottom-4 right-4 z-10 flex items-center bg-zinc-900/90 dark:bg-zinc-900/90 backdrop-blur-md border border-zinc-700/80 rounded-full shadow-lg p-1 text-zinc-300">
+        {/* Floating Zoom & Fit Controls (Always pinned at bottom-right, razor-sharp dark contrast) */}
+        <div className="absolute bottom-4 right-4 z-10 flex items-center bg-zinc-950/95 backdrop-blur-md border border-zinc-700/80 rounded-full shadow-2xl p-1 text-zinc-200 space-x-1">
           <button
             type="button"
             onClick={zoomOut}
-            className="p-1.5 rounded-full hover:bg-zinc-800 active:scale-90 transition-all"
+            className="p-1.5 rounded-full hover:bg-zinc-800 text-zinc-300 hover:text-white active:scale-90 transition-all"
             title="Zoom out"
+            aria-label="Zoom out"
           >
             <ZoomOut className="w-4 h-4" />
           </button>
           <button
             type="button"
             onClick={resetZoom}
-            className="px-2 py-0.5 text-[11px] font-semibold text-zinc-200 hover:text-white"
-            title="Reset zoom to 100%"
+            className="px-2 py-0.5 text-xs font-semibold text-zinc-200 hover:text-white hover:bg-zinc-800/80 rounded-md transition-colors"
+            title="Reset zoom to Fit Width"
           >
             {Math.round(scale * 100)}%
           </button>
           <button
             type="button"
             onClick={zoomIn}
-            className="p-1.5 rounded-full hover:bg-zinc-800 active:scale-90 transition-all"
+            className="p-1.5 rounded-full hover:bg-zinc-800 text-zinc-300 hover:text-white active:scale-90 transition-all"
             title="Zoom in"
+            aria-label="Zoom in"
           >
             <ZoomIn className="w-4 h-4" />
+          </button>
+
+          <div className="w-px h-4 bg-zinc-700 mx-0.5" />
+
+          {/* One-tap "Fit Width" / "Fit Page" toggle button */}
+          <button
+            type="button"
+            onClick={toggleFitMode}
+            className="flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-zinc-800/90 hover:bg-zinc-700 text-zinc-200 hover:text-white active:scale-95 transition-all border border-zinc-700/60 shadow-sm"
+            title={
+              fitMode === 'width'
+                ? 'Currently Fit Width. Tap to Fit Page'
+                : fitMode === 'page'
+                ? 'Currently Fit Page. Tap to Fit Width'
+                : 'Tap to Fit Width'
+            }
+            aria-label="Toggle Fit Mode"
+          >
+            {fitMode === 'page' ? (
+              <>
+                <StretchHorizontal className="w-3.5 h-3.5 text-blue-400" />
+                <span className="text-[11px] font-semibold text-zinc-100">Fit Page</span>
+              </>
+            ) : (
+              <>
+                <Minimize2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-[11px] font-semibold text-zinc-100">Fit Width</span>
+              </>
+            )}
           </button>
         </div>
       </div>
 
-      {/* Bottom Controls Bar (Frosted Glass, Large Touch Controls) */}
-      <footer className="relative z-20 w-full glass-tabbar bg-zinc-950/90 backdrop-blur-md border-t border-zinc-800/80 px-4 py-2 pb-safe flex flex-col space-y-2 shadow-lg">
+      {/* Bottom Controls Bar (Solid/frosted dark reader styling, high-contrast) */}
+      <footer className="relative z-20 w-full bg-zinc-950/95 backdrop-blur-md border-t border-zinc-800 text-zinc-100 px-4 py-2 pb-safe flex flex-col space-y-2 shadow-lg">
         {/* Quick Note Indicator Pill */}
         {currentNotesCount > 0 ? (
           <button
             type="button"
             onClick={() => setIsNotesOpen(true)}
-            className="mx-auto inline-flex items-center space-x-1.5 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 hover:text-amber-200 hover:bg-amber-500/25 active:scale-95 transition-all text-xs font-medium"
+            className="mx-auto inline-flex items-center space-x-1.5 px-3.5 py-1 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-200 hover:text-white hover:bg-amber-500/30 active:scale-95 transition-all text-xs font-semibold shadow-sm"
           >
-            <span>📝</span>
+            <span className="text-amber-400">📝</span>
             <span>
               {currentNotesCount} {currentNotesCount === 1 ? 'note' : 'notes'} on this page - tap to view
             </span>
@@ -521,9 +718,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
           <button
             type="button"
             onClick={() => setIsNotesOpen(true)}
-            className="mx-auto inline-flex items-center space-x-1 px-3 py-0.5 rounded-full text-zinc-400 hover:text-zinc-200 text-[11px] hover:bg-zinc-800/50 active:scale-95 transition-all"
+            className="mx-auto inline-flex items-center space-x-1.5 px-3 py-1 rounded-full text-zinc-300 hover:text-white text-xs font-medium bg-zinc-900/90 border border-zinc-800 hover:bg-zinc-800 active:scale-95 transition-all shadow-sm"
           >
-            <StickyNote className="w-3 h-3" />
+            <StickyNote className="w-3.5 h-3.5 text-zinc-400" />
             <span>+ Add note to page {currentPage}</span>
           </button>
         )}
@@ -535,7 +732,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
             type="button"
             onClick={goToPrevPage}
             disabled={currentPage <= 1}
-            className="w-11 h-11 rounded-full flex items-center justify-center bg-zinc-800/90 hover:bg-zinc-700 disabled:opacity-30 disabled:pointer-events-none text-zinc-100 active:scale-90 transition-transform shadow"
+            className="w-11 h-11 rounded-full flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 disabled:opacity-25 disabled:pointer-events-none text-white active:scale-90 transition-transform shadow-md border border-zinc-700/60"
             aria-label="Previous page"
           >
             <ChevronLeft className="w-6 h-6" />
@@ -552,9 +749,9 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
               className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-blue-500 focus:outline-none"
               aria-label="Scrub page slider"
             />
-            <div className="w-full flex justify-between text-[10px] text-zinc-400 font-medium mt-1">
+            <div className="w-full flex justify-between text-[11px] text-zinc-300 font-medium mt-1">
               <span>Page 1</span>
-              <span className="text-zinc-200 font-semibold">
+              <span className="text-white font-bold">
                 {currentPage} / {totalPages}
               </span>
               <span>Page {totalPages}</span>
@@ -566,7 +763,7 @@ export const PdfViewerModal: React.FC<PdfViewerModalProps> = ({
             type="button"
             onClick={goToNextPage}
             disabled={currentPage >= totalPages}
-            className="w-11 h-11 rounded-full flex items-center justify-center bg-zinc-800/90 hover:bg-zinc-700 disabled:opacity-30 disabled:pointer-events-none text-zinc-100 active:scale-90 transition-transform shadow"
+            className="w-11 h-11 rounded-full flex items-center justify-center bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 disabled:opacity-25 disabled:pointer-events-none text-white active:scale-90 transition-transform shadow-md border border-zinc-700/60"
             aria-label="Next page"
           >
             <ChevronRight className="w-6 h-6" />
